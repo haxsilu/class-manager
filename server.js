@@ -153,7 +153,6 @@ const hasPaidMonth = (sid,cid,m) =>
 /* ======================== UI Template (Dark + Mobile) ======================== */
 function page(title, body, head='', opts={}) {
   const org      = getSetting('org_name','Class Manager');
-  const currency = getSetting('currency_symbol','Rs.');
   const theme    = getSetting('theme','dark');
   const primary  = getSetting('primary_color','#0ea5e9');
 
@@ -186,6 +185,10 @@ th,td{padding:.55rem .65rem;border-bottom:1px solid #0e1627;vertical-align:middl
 .banner{border-radius:.8rem;padding:.7rem 1rem;margin:.9rem 0;border:1px solid}
 .banner.success{background:#0d1f16;border-color:#217a4b;color:#b5f3c9}
 .banner.error{background:#2b1010;border-color:#a04040;color:#f3c0c0}
+#notify{display:none;position:relative;text-align:center;padding:.7rem;border-radius:.6rem;margin-bottom:1rem;font-weight:700}
+#notify.success{background:#065f46;color:#d1fae5}
+#notify.warn{background:#92400e;color:#fef3c7}
+#notify.error{background:#7f1d1d;color:#fee2e2}
 a[role=button],button{display:inline-flex;align-items:center;justify-content:center;padding:.5rem .8rem;border:1px solid var(--border);background:var(--chip);color:var(--text);border-radius:.6rem;cursor:pointer;font-weight:600;text-decoration:none}
 a[role=button].muted,button.muted{background:#0c1424;border-color:#2b3a5a}
 a[role=button].muted:hover,button.muted:hover{background:#13213a}
@@ -402,19 +405,18 @@ app.get('/students/:id/qr', async (req,res)=>{
   </body></html>`);
 });
 
-/* ---------- Scanner (QR + sounds + manual) ---------- */
+/* ---------- Scanner (QR + notification bar + sounds + manual) ---------- */
 app.get('/scanner', (req,res)=>{
   const head = `<script src="https://unpkg.com/html5-qrcode" defer></script>`;
   const body = `
   <section class="card">
-    <p class="small">Scan a student QR to mark <strong>today</strong> present in their class, or use manual attendance by phone.</p>
+    <div id="notify" class="success"></div>
 
-    <audio id="ok" preload="auto"   src="data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA//////////8AAAABAAACCgAAAwABAAACcQCA//////////8AAAABAAACCgAAAAAAAAAAAAAAAAAAAA"></audio>
-    <audio id="err" preload="auto"  src="data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA//////////8AAAABAAACCgAAAwABAAACcQCA//////////8AAAABAAACCgAAAAAAAAAAAAAAAAAAAA"></audio>
+    <audio id="snd-ok"   preload="auto" src="data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA//////////8AAAABAAACCgAAAwABAAACcQCA//////////8AAAABAAACCgAAAAAAAAAAAAAAAAAAAA"></audio>
+    <audio id="snd-warn" preload="auto" src="data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA//////////8AAAABAAACCgAAAwABAAACcQCA//////////8AAAABAAACCgAAAAAAAAAAAAAAAAAAAA"></audio>
+    <audio id="snd-err"  preload="auto" src="data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA//////////8AAAABAAACCgAAAwABAAACcQCA//////////8AAAABAAACCgAAAAAAAAAAAAAAAAAAAA"></audio>
 
     <div id="reader" style="max-width:520px;margin:auto"></div>
-    <div id="live" class="banner success" style="display:none;margin-top:.8rem"></div>
-    <div id="bad"  class="banner error"   style="display:none;margin-top:.8rem"></div>
 
     <article class="card" style="margin-top:1rem">
       <strong>Manual attendance (by phone)</strong>
@@ -430,36 +432,61 @@ app.get('/scanner', (req,res)=>{
   </section>
 
   <script>
-    function play(ok){ try{ const a=document.getElementById(ok?'ok':'err'); a.currentTime=0; a.play(); }catch(e){} }
-    function show(el,txt){ const n=document.getElementById(el); n.textContent=txt; n.style.display='block'; }
-    function hide(id){ document.getElementById(id).style.display='none'; }
-    function setPay(t){ const w=document.getElementById('paywrap'); const a=document.getElementById('paybtn'); if(t){ a.href='/pay?token='+encodeURIComponent(t); w.style.display='block'; } else w.style.display='none'; }
-    function extractToken(txt){ try{ if(txt.startsWith('http')){ const u=new URL(txt); const p=u.pathname.split('/').filter(Boolean); return p[p.length-1]||''; } }catch{} return txt.split('/').pop(); }
-
-    const last=new Map();
-    async function mark(token){
-      const now=Date.now(); if(last.has(token) && now-last.get(token)<2200) return; last.set(token,now);
-      try{
-        const r=await fetch('/scan/'+encodeURIComponent(token)+'/auto',{method:'POST'}); const d=await r.json();
-        if(d.ok){ hide('bad'); show('live', d.student.name+' · '+d.class+' · '+d.date + (d.paid?' · Paid':' · Unpaid')); setPay(token); play(true); }
-        else{ hide('live'); show('bad', d.error||'Error'); setPay(null); play(false); }
-      }catch{ hide('live'); show('bad','Network error'); setPay(null); play(false); }
+    function nshow(type,msg){
+      const el=document.getElementById('notify');
+      el.className=''; el.classList.add(type); el.textContent=msg; el.style.display='block';
+      clearTimeout(window.__notifyTimer); window.__notifyTimer=setTimeout(()=>{ el.style.display='none'; }, 2200);
     }
-
+    function beep(kind){
+      const id = kind==='success'?'snd-ok':kind==='warn'?'snd-warn':'snd-err';
+      try{ const a=document.getElementById(id); a.currentTime=0; a.play(); }catch(e){}
+    }
+    function setPay(token){
+      const w=document.getElementById('paywrap'); const a=document.getElementById('paybtn');
+      if(token){ a.href='/pay?token='+encodeURIComponent(token); w.style.display='block'; } else { w.style.display='none'; }
+    }
+    function extractToken(txt){
+      try{ if(txt.startsWith('http')){ const u=new URL(txt); const p=u.pathname.split('/').filter(Boolean); return p[p.length-1]||''; } }
+      catch(e){} return (txt||'').split('/').pop();
+    }
+    const recent=new Map();
+    async function mark(token){
+      const now=Date.now(); if(recent.has(token) && now-recent.get(token)<2200) return; recent.set(token, now);
+      try{
+        const r=await fetch('/scan/'+encodeURIComponent(token)+'/auto',{method:'POST'});
+        const d=await r.json();
+        if(d.ok){
+          nshow('success','Attendance marked: '+d.student.name+' · '+d.class);
+          beep('success'); setPay(token);
+        }else if(d.warning){
+          nshow('warn',d.warning); beep('warn'); setPay(null);
+        }else{
+          nshow('error',d.error||'Error'); beep('error'); setPay(null);
+        }
+      }catch{ nshow('error','Network error'); beep('error'); setPay(null); }
+    }
     document.addEventListener('DOMContentLoaded', ()=>{
       if(window.Html5QrcodeScanner){
         const sc=new Html5QrcodeScanner('reader',{fps:12,qrbox:250,rememberLastUsedCamera:true});
         sc.render((txt)=>mark(extractToken(txt)));
+      }else{
+        const it=setInterval(()=>{
+          if(window.Html5QrcodeScanner){
+            clearInterval(it);
+            const sc=new Html5QrcodeScanner('reader',{fps:12,qrbox:250,rememberLastUsedCamera:true});
+            sc.render((txt)=>mark(extractToken(txt)));
+          }
+        },120);
       }
       document.getElementById('mbtn')?.addEventListener('click', async ()=>{
         const phone=(document.getElementById('mphone')?.value||'').trim();
-        if(!phone){ show('bad','Enter phone'); play(false); return; }
+        if(!phone){ nshow('warn','Enter phone number'); beep('warn'); return; }
         try{
           const r=await fetch('/attendance/manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
           const d=await r.json();
-          if(d.ok){ hide('bad'); show('live', d.student.name+' · '+d.class+' · '+d.date + (d.paid?' · Paid':' · Unpaid')); setPay(d.token); play(true); }
-          else{ hide('live'); show('bad', d.error||'Could not mark'); setPay(null); play(false); }
-        }catch{ hide('live'); show('bad','Network error'); setPay(null); play(false); }
+          if(d.ok){ nshow('success','Attendance marked: '+d.student.name+' · '+d.class); beep('success'); setPay(d.token); }
+          else{ nshow('error', d.error||'Failed'); beep('error'); setPay(null); }
+        }catch{ nshow('error','Network error'); beep('error'); setPay(null); }
       });
     });
   </script>`;
@@ -477,10 +504,12 @@ app.post('/scan/:token/auto', (req,res)=>{
     if(!clazz) return res.json({ok:false, error:'Class unavailable'});
 
     const date = todayISO(); const m = monthKey(new Date(date));
+    const existing = db.prepare(`SELECT 1 FROM attendance WHERE student_id=? AND class_id=? AND date=?`).get(sid, clazz.id, date);
+    if(existing) return res.json({ok:false, warning:'Already marked today'});
+
     db.prepare(`
       INSERT INTO attendance(student_id,class_id,date,present)
       VALUES(?,?,?,1)
-      ON CONFLICT(student_id,class_id,date) DO UPDATE SET present=1
     `).run(sid, clazz.id, date);
 
     const paid = hasPaidMonth(sid, clazz.id, m);
@@ -503,10 +532,12 @@ app.post('/attendance/manual', (req,res)=>{
     if(!clazz) return res.json({ok:false, error:'Class unavailable'});
 
     const date = todayISO(); const m = monthKey(new Date(date));
+    const existing = db.prepare(`SELECT 1 FROM attendance WHERE student_id=? AND class_id=? AND date=?`).get(student.id, clazz.id, date);
+    if(existing) return res.json({ok:false, warning:'Already marked today'});
+
     db.prepare(`
       INSERT INTO attendance(student_id,class_id,date,present)
       VALUES(?,?,?,1)
-      ON CONFLICT(student_id,class_id,date) DO UPDATE SET present=1
     `).run(student.id, clazz.id, date);
 
     const paid = hasPaidMonth(student.id, clazz.id, m);
