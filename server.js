@@ -71,7 +71,9 @@ function initDb(d){
 }
 
 function migrateDb(d){
+  // Add missing columns/indexes safely (no reset)
   try { d.prepare(`ALTER TABLE students ADD COLUMN is_free INTEGER DEFAULT 0`).run(); } catch {}
+  // Ensure core classes exist
   const have = new Set(d.prepare(`SELECT title FROM classes`).all().map(r=>r.title));
   for (const t of CORE_CLASSES) if (!have.has(t)) d.prepare(`INSERT INTO classes(title,fee) VALUES(?,2000)`).run(t);
 }
@@ -99,7 +101,7 @@ function page(title, body, banner=''){
   <title>${title}</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@1/css/pico.min.css">
   <style>
-  :root{--card:#0b1220;--text:#e8eef8;--muted:#9fb4cb;--border:#1f2a44}
+  :root{--card:#0b1220;--text:#e8eef8;--muted:#9fb4cb;--border:#1f2a44;--chip:#0f172a;--chip-hover:#12203a}
   html,body{background:#0a0f1a;color:var(--text)}
   .container{max-width:1080px;padding-inline:16px}
   header.nav{display:flex;flex-wrap:wrap;justify-content:center;gap:.6rem;margin-top:1rem}
@@ -107,7 +109,7 @@ function page(title, body, banner=''){
   header.nav a:hover{background:#334155}
   table{width:100%;border-collapse:collapse;margin-top:1rem}
   td,th{padding:.5rem;border-bottom:1px solid #334155}
-  .card{border:1px solid var(--border);border-radius:1rem;padding:1rem;background:#0b1220}
+  .card{border:1px solid var(--border);border-radius:1rem;padding:1rem;background:var(--card)}
   #notification{display:none;text-align:center;padding:.7rem;border-radius:.6rem;margin-bottom:1rem;font-weight:700}
   #notification.success{background:#065f46;color:#d1fae5}
   #notification.warn{background:#92400e;color:#fef3c7}
@@ -119,6 +121,7 @@ function page(title, body, banner=''){
     table{display:block;overflow-x:auto;white-space:nowrap}
     button,a[role=button]{width:100%;margin-top:.5rem}
   }
+  .row{display:flex;gap:.8rem;flex-wrap:wrap;align-items:end}
   </style></head><body><main class="container">
   <header class="nav">
     <a href="/students">Students</a><a href="/scanner">Scanner</a>
@@ -131,267 +134,357 @@ function page(title, body, banner=''){
   <footer>Created by Pulindu Pansilu</footer>
   </main></body></html>`;
 }
+
 /* ================== Routes ================== */
 app.get('/',(r,s)=>s.redirect('/students'));
 
 /* ---- Students list ---- */
 app.get('/students',(req,res)=>{
   const list = db.prepare(`SELECT * FROM students ORDER BY grade,name`).all();
-  const body = `<a role="button" href="/students/new">Add Student</a>
+  const body = `<a role="button" class="muted" href="/students/new">Add Student</a>
+  <div style="overflow:auto;margin-top:.6rem">
   <table><thead><tr><th>Name</th><th>Grade</th><th>Phone</th><th>Free</th><th>QR</th><th>Actions</th></tr></thead>
-  <tbody>${list.map(s=>`
-  <tr><td>${s.name}</td><td>${s.grade}</td><td>${s.phone||''}</td>
-  <td>${s.is_free?'🆓':''}</td>
-  <td><a role="button" href="/students/${s.id}/qr">QR</a></td>
-  <td><a href="/students/${s.id}/edit">Edit</a>
-  <form method="post" action="/students/${s.id}/delete" style="display:inline"><button>Del</button></form></td></tr>`).join('')}</tbody></table>`;
-  res.send(page('Students',body));
+  <tbody>${list.map(s=>`<tr>
+    <td>${s.name}</td><td>${s.grade}</td><td>${s.phone||''}</td>
+    <td>${s.is_free?'🆓':''}</td>
+    <td><a role="button" class="muted" href="/students/${s.id}/qr">QR</a></td>
+    <td style="display:flex;gap:.4rem;flex-wrap:wrap">
+      <a role="button" class="muted" href="/students/${s.id}/edit">Edit</a>
+      <form method="post" action="/students/${s.id}/delete" onsubmit="return confirm('Delete ${s.name}?')">
+        <button class="secondary" style="background:#2a0f14;border-color:#7a2030;color:#ffd7db">Delete</button>
+      </form>
+    </td>
+  </tr>`).join('')}</tbody></table></div>`;
+  res.send(page('Students', body));
 });
 
-/* ---- Add/Edit/Delete student ---- */
+/* ---- Add student ---- */
 app.get('/students/new',(req,res)=>res.send(page('Add Student',`
-<form method="post" action="/students/new">
-<label>Name<input name="name" required></label>
-<label>Phone<input name="phone"></label>
-<label>Grade<select name="grade">${CORE_CLASSES.map(c=>`<option>${c}</option>`).join('')}</select></label>
-<label><input type="checkbox" name="is_free"> Free card</label>
-<button type="submit">Save</button>
-</form>`)));
-
+  <section class="card">
+    <form method="post" action="/students/new" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem">
+      <label>Name<input name="name" required></label>
+      <label>Phone<input name="phone"></label>
+      <label>Grade<select name="grade"><option>Grade 6</option><option>Grade 7</option><option>Grade 8</option><option>O/L</option></select></label>
+      <label style="align-self:end"><input type="checkbox" name="is_free"> Free card</label>
+      <div style="grid-column:1/-1;display:flex;gap:.8rem">
+        <button type="submit">Save</button>
+        <a role="button" class="muted" href="/students">Cancel</a>
+      </div>
+    </form>
+  </section>`)));
 app.post('/students/new',(req,res)=>{
-  const {name,phone,grade}=req.body; const is_free=req.body.is_free?1:0;
-  const r=db.prepare(`INSERT INTO students(name,phone,grade,is_free)VALUES(?,?,?,?)`).run(name,phone,grade,is_free);
-  const token=signId(r.lastInsertRowid);
-  db.prepare(`UPDATE students SET qr_token=? WHERE id=?`).run(token,r.lastInsertRowid);
+  const {name,phone,grade}=req.body; const is_free = req.body.is_free?1:0;
+  const r = db.prepare(`INSERT INTO students(name,phone,grade,is_free) VALUES(?,?,?,?)`).run(name,phone,grade,is_free);
+  const token = signId(r.lastInsertRowid);
+  db.prepare(`UPDATE students SET qr_token=? WHERE id=?`).run(token, r.lastInsertRowid);
   res.redirect('/students');
 });
 
+/* ---- Edit student ---- */
 app.get('/students/:id/edit',(req,res)=>{
-  const s=db.prepare(`SELECT * FROM students WHERE id=?`).get(req.params.id);
-  if(!s)return res.send('Not found');
+  const s = db.prepare(`SELECT * FROM students WHERE id=?`).get(req.params.id);
+  if(!s) return res.send('Not found');
   res.send(page('Edit Student',`
-  <form method="post" action="/students/${s.id}/edit">
-  <label>Name<input name="name" value="${s.name}"></label>
-  <label>Phone<input name="phone" value="${s.phone||''}"></label>
-  <label>Grade<select name="grade">${CORE_CLASSES.map(c=>`<option${s.grade===c?' selected':''}>${c}</option>`).join('')}</select></label>
-  <label><input type="checkbox" name="is_free"${s.is_free?' checked':''}> Free card</label>
-  <button>Save</button></form>`));
+  <section class="card">
+    <form method="post" action="/students/${s.id}/edit" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem">
+      <label>Name<input name="name" value="${s.name}" required></label>
+      <label>Phone<input name="phone" value="${s.phone||''}"></label>
+      <label>Grade<select name="grade">
+        <option${s.grade==='Grade 6'?' selected':''}>Grade 6</option>
+        <option${s.grade==='Grade 7'?' selected':''}>Grade 7</option>
+        <option${s.grade==='Grade 8'?' selected':''}>Grade 8</option>
+        <option${s.grade==='O/L'?' selected':''}>O/L</option>
+      </select></label>
+      <label style="align-self:end"><input type="checkbox" name="is_free"${s.is_free?' checked':''}> Free card</label>
+      <div style="grid-column:1/-1;display:flex;gap:.8rem">
+        <button type="submit">Save</button>
+        <a role="button" class="muted" href="/students">Back</a>
+      </div>
+    </form>
+  </section>`));
 });
-
 app.post('/students/:id/edit',(req,res)=>{
-  const {name,phone,grade}=req.body;const is_free=req.body.is_free?1:0;
+  const {name,phone,grade}=req.body; const is_free=req.body.is_free?1:0;
   db.prepare(`UPDATE students SET name=?,phone=?,grade=?,is_free=? WHERE id=?`).run(name,phone,grade,is_free,req.params.id);
   res.redirect('/students');
 });
 
+/* ---- Delete student ---- */
 app.post('/students/:id/delete',(req,res)=>{
-  const id=req.params.id;
-  const tx=db.transaction(()=>{db.prepare(`DELETE FROM payments WHERE student_id=?`).run(id);
-  db.prepare(`DELETE FROM attendance WHERE student_id=?`).run(id);
-  db.prepare(`DELETE FROM students WHERE id=?`).run(id);});tx();
+  const id = Number(req.params.id);
+  const tx = db.transaction(()=>{
+    db.prepare(`DELETE FROM payments WHERE student_id=?`).run(id);
+    db.prepare(`DELETE FROM attendance WHERE student_id=?`).run(id);
+    db.prepare(`DELETE FROM students WHERE id=?`).run(id);
+  });
+  tx();
   res.redirect('/students');
 });
 
-/* ---- QR print ---- */
-app.get('/students/:id/qr',async(req,res)=>{
-  const s=db.prepare(`SELECT * FROM students WHERE id=?`).get(req.params.id);
-  if(!s)return res.send('Not found');
-  const img=await QRCode.toDataURL(`${BASE}/scan/${s.qr_token}`);
-  res.send(`<!doctype html><html><body style="text-align:center"><h2>${s.name}</h2><img src="${img}" width="250"><br><button onclick="window.print()">Print</button></body></html>`);
+/* ---- Minimal QR print (name + QR only) ---- */
+app.get('/students/:id/qr', async (req,res)=>{
+  const s = db.prepare(`SELECT * FROM students WHERE id=?`).get(req.params.id);
+  if(!s) return res.send('Not found');
+  const img = await QRCode.toDataURL(`${BASE}/scan/${s.qr_token}`);
+  res.send(`<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>${s.name}</title><style>body{text-align:center;font-family:sans-serif}@media print{button{display:none}}</style></head>
+    <body><h2>${s.name}</h2><img src="${img}" width="300"><br><button onclick="window.print()">Print</button></body></html>`);
 });
 
-/* ---- Scanner ---- */
+/* ---- Scanner with notification & sounds ---- */
 app.get('/scanner',(req,res)=>{
-  const body=`<div id="notification"></div>
-  <audio id="beep" src="https://actions.google.com/sounds/v1/cartoon/wood_plank_flicks.ogg"></audio>
-  <div id="reader" style="max-width:400px;margin:auto"></div>
-  <div id="actions" style="text-align:center;margin-top:1rem;display:none">
-  <a id="payBtn" href="#" role="button">Record Payment</a></div>
+  const body = `
+  <div id="notification"></div>
+  <audio id="successSound" src="data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA//////////8AAAABAAACCgAAAwABAAACcQCA//////////8AAAABAAACCgAAAAAAAAAAAAAAAAAAAA"></audio>
+  <audio id="warnSound"    src="data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA//////////8AAAABAAACCgAAAwABAAACcQCA//////////8AAAABAAACCgAAAAAAAAAAAAAAAAAAAA"></audio>
+  <audio id="errorSound"   src="data:audio/mp3;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA//////////8AAAABAAACCgAAAwABAAACcQCA//////////8AAAABAAACCgAAAAAAAAAAAAAAAAAAAA"></audio>
+  <div id="reader" style="max-width:520px;margin:auto"></div>
+  <div id="actions" class="row" style="display:none;margin-top:.6rem">
+    <a id="payBtn" role="button" class="muted" href="#">Record Payment</a>
+  </div>
   <script src="https://unpkg.com/html5-qrcode"></script>
   <script>
-  const beep=()=>{document.getElementById('beep').play()};
-  const note=(t,m)=>{const n=document.getElementById('notification');n.innerText=m;n.style.display='block';setTimeout(()=>n.style.display='none',2000)};
-  async function mark(token){try{const r=await fetch('/scan/'+token+'/auto',{method:'POST'});const d=await r.json();
-    if(d.ok){note('ok','Marked '+d.student.name);beep();if(d.token){const p=document.getElementById('payBtn');p.href='/pay?token='+d.token;document.getElementById('actions').style.display='block';}}
-    else note('err',d.error||d.warning);}catch{note('err','error');}}
-  const sc=new Html5QrcodeScanner('reader',{fps:10,qrbox:250});
-  sc.render(txt=>mark(txt.split('/').pop()));
+    const note=(t,m)=>{const n=document.getElementById('notification');n.className=t;n.textContent=m;n.style.display='block';clearTimeout(window.__nt);window.__nt=setTimeout(()=>n.style.display='none',2200)};
+    const beep=(which)=>{try{const id=which==='ok'?'successSound':which==='warn'?'warnSound':'errorSound';const a=document.getElementById(id);a.currentTime=0;a.play()}catch{}}
+    function tokenFrom(txt){try{if(txt.startsWith('http')){const u=new URL(txt);const p=u.pathname.split('/').filter(Boolean);return p[p.length-1]||''}}catch{}return txt.split('/').pop()}
+    const seen=new Map();
+    async function mark(token){
+      const now=Date.now();if(seen.has(token)&&now-seen.get(token)<2000)return;seen.set(token,now);
+      try{const r=await fetch('/scan/'+encodeURIComponent(token)+'/auto',{method:'POST'});const d=await r.json();
+        if(d.ok){note('success','Attendance marked: '+d.student.name);beep('ok');
+          if(d.token){const pay=document.getElementById('payBtn');pay.href='/pay?token='+encodeURIComponent(d.token);document.getElementById('actions').style.display='flex';}
+        }
+        else if(d.warning){note('warn',d.warning);beep('warn')}
+        else{note('error',d.error||'Error');beep('err')}
+      }catch{note('error','Network error');beep('err')}
+    }
+    document.addEventListener('DOMContentLoaded',()=>{
+      const sc=new Html5QrcodeScanner('reader',{fps:12,qrbox:250,rememberLastUsedCamera:true});
+      sc.render(txt=>mark(tokenFrom(txt)));
+    });
   </script>`;
-  res.send(page('Scanner',body));
-});
-/* ================== Routes ================== */
-app.get('/',(r,s)=>s.redirect('/students'));
-
-/* ---- Students list ---- */
-app.get('/students',(req,res)=>{
-  const list = db.prepare(`SELECT * FROM students ORDER BY grade,name`).all();
-  const body = `<a role="button" href="/students/new">Add Student</a>
-  <table><thead><tr><th>Name</th><th>Grade</th><th>Phone</th><th>Free</th><th>QR</th><th>Actions</th></tr></thead>
-  <tbody>${list.map(s=>`
-  <tr><td>${s.name}</td><td>${s.grade}</td><td>${s.phone||''}</td>
-  <td>${s.is_free?'🆓':''}</td>
-  <td><a role="button" href="/students/${s.id}/qr">QR</a></td>
-  <td><a href="/students/${s.id}/edit">Edit</a>
-  <form method="post" action="/students/${s.id}/delete" style="display:inline"><button>Del</button></form></td></tr>`).join('')}</tbody></table>`;
-  res.send(page('Students',body));
+  res.send(page('Scanner', body));
 });
 
-/* ---- Add/Edit/Delete student ---- */
-app.get('/students/new',(req,res)=>res.send(page('Add Student',`
-<form method="post" action="/students/new">
-<label>Name<input name="name" required></label>
-<label>Phone<input name="phone"></label>
-<label>Grade<select name="grade">${CORE_CLASSES.map(c=>`<option>${c}</option>`).join('')}</select></label>
-<label><input type="checkbox" name="is_free"> Free card</label>
-<button type="submit">Save</button>
-</form>`)));
+app.post('/scan/:token/auto',(req,res)=>{
+  try{
+    const tok = req.params.token;
+    const sid = unsign(tok);
+    const s = db.prepare(`SELECT * FROM students WHERE id=?`).get(sid);
+    if(!s) return res.json({ok:false,error:'Student not found'});
+    if(s.is_free) return res.json({ok:true,student:{id:s.id,name:s.name},free:true,token:tok});
 
-app.post('/students/new',(req,res)=>{
-  const {name,phone,grade}=req.body; const is_free=req.body.is_free?1:0;
-  const r=db.prepare(`INSERT INTO students(name,phone,grade,is_free)VALUES(?,?,?,?)`).run(name,phone,grade,is_free);
-  const token=signId(r.lastInsertRowid);
-  db.prepare(`UPDATE students SET qr_token=? WHERE id=?`).run(token,r.lastInsertRowid);
-  res.redirect('/students');
+    let c = db.prepare(`SELECT * FROM classes WHERE title=?`).get(s.grade);
+    if(!c){ db.prepare(`INSERT INTO classes(title) VALUES(?)`).run(s.grade); c = db.prepare(`SELECT * FROM classes WHERE title=?`).get(s.grade); }
+    const today=todayISO();
+    const dup = db.prepare(`SELECT 1 FROM attendance WHERE student_id=? AND class_id=? AND date=?`).get(sid,c.id,today);
+    if(dup) return res.json({ok:false,warning:'Already marked today',token:tok});
+    db.prepare(`INSERT INTO attendance(student_id,class_id,date,present) VALUES(?,?,?,1)`).run(sid,c.id,today);
+    res.json({ok:true,student:{id:s.id,name:s.name},class:c.title,date:today,token:tok});
+  }catch{ res.json({ok:false,error:'Bad token'}); }
 });
 
-app.get('/students/:id/edit',(req,res)=>{
-  const s=db.prepare(`SELECT * FROM students WHERE id=?`).get(req.params.id);
-  if(!s)return res.send('Not found');
-  res.send(page('Edit Student',`
-  <form method="post" action="/students/${s.id}/edit">
-  <label>Name<input name="name" value="${s.name}"></label>
-  <label>Phone<input name="phone" value="${s.phone||''}"></label>
-  <label>Grade<select name="grade">${CORE_CLASSES.map(c=>`<option${s.grade===c?' selected':''}>${c}</option>`).join('')}</select></label>
-  <label><input type="checkbox" name="is_free"${s.is_free?' checked':''}> Free card</label>
-  <button>Save</button></form>`));
+/* ---- Attendance sheet + manual attendance by phone ---- */
+app.get('/attendance-sheet',(req,res)=>{
+  const classes = db.prepare(`SELECT * FROM classes WHERE title IN (${CORE_CLASSES.map(()=>'?').join(',')}) ORDER BY title`).all(...CORE_CLASSES);
+  const classTitle = req.query.class && CORE_CLASSES.includes(req.query.class) ? req.query.class : (classes[0]?.title || 'Grade 6');
+  const date = (req.query.date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)) ? req.query.date : todayISO();
+  const clazz = db.prepare(`SELECT * FROM classes WHERE title=?`).get(classTitle);
+  const students = db.prepare(`SELECT s.* FROM students s WHERE s.grade=? ORDER BY s.name`).all(classTitle);
+  const present = new Set(db.prepare(`SELECT student_id FROM attendance WHERE class_id=? AND date=?`).all(clazz?.id||0,date).map(r=>r.student_id));
+  const body = `
+  <section class="card">
+    <form method="get" action="/attendance-sheet" class="row">
+      <label>Class <select name="class">${classes.map(c=>`<option ${c.title===classTitle?'selected':''}>${c.title}</option>`).join('')}</select></label>
+      <label>Date <input type="date" name="date" value="${date}"></label>
+      <button type="submit">Show</button>
+    </form>
+    <details style="margin-top:.6rem">
+      <summary>Mark attendance manually (by phone)</summary>
+      <form method="post" action="/attendance/manual" class="row" style="margin-top:.6rem">
+        <input type="hidden" name="class" value="${classTitle}">
+        <input type="hidden" name="date" value="${date}">
+        <label>Phone <input name="phone" pattern="[0-9+ -]{7,}" required placeholder="07XXXXXXXX"></label>
+        <button type="submit">Mark Present</button>
+      </form>
+    </details>
+    <div style="overflow:auto;margin-top:.6rem">
+      <table><thead><tr><th>Present</th><th>Name</th><th>Phone</th><th>Free</th></tr></thead>
+      <tbody>${students.map(s=>`<tr><td>${present.has(s.id)?'Yes':'—'}</td><td>${s.name}</td><td>${s.phone||''}</td><td>${s.is_free?'🆓':''}</td></tr>`).join('')}</tbody></table>
+    </div>
+  </section>`;
+  res.send(page('Attendance', body));
 });
 
-app.post('/students/:id/edit',(req,res)=>{
-  const {name,phone,grade}=req.body;const is_free=req.body.is_free?1:0;
-  db.prepare(`UPDATE students SET name=?,phone=?,grade=?,is_free=? WHERE id=?`).run(name,phone,grade,is_free,req.params.id);
-  res.redirect('/students');
+app.post('/attendance/manual',(req,res)=>{
+  const phone = String(req.body.phone||'').trim();
+  const classTitle = String(req.body.class||'').trim();
+  const date = (req.body.date && /^\d{4}-\d{2}-\d{2}$/.test(req.body.date)) ? req.body.date : todayISO();
+  const s = db.prepare(`SELECT * FROM students WHERE phone=?`).get(phone);
+  if(!s) return res.send(page('Attendance', `<p class="banner">No student with phone <strong>${phone}</strong>.</p><p><a href="/attendance-sheet?class=${encodeURIComponent(classTitle)}&date=${encodeURIComponent(date)}">Back</a></p>`));
+  let c = db.prepare(`SELECT * FROM classes WHERE title=?`).get(classTitle || s.grade);
+  if(!c){ db.prepare(`INSERT INTO classes(title) VALUES(?)`).run(classTitle || s.grade); c = db.prepare(`SELECT * FROM classes WHERE title=?`).get(classTitle || s.grade); }
+  try{
+    db.prepare(`INSERT INTO attendance(student_id,class_id,date,present) VALUES(?,?,?,1)`).run(s.id,c.id,date);
+    res.redirect(`/attendance-sheet?class=${encodeURIComponent(classTitle)}&date=${encodeURIComponent(date)}`);
+  }catch{
+    res.redirect(`/attendance-sheet?class=${encodeURIComponent(classTitle)}&date=${encodeURIComponent(date)}`);
+  }
 });
 
-app.post('/students/:id/delete',(req,res)=>{
-  const id=req.params.id;
-  const tx=db.transaction(()=>{db.prepare(`DELETE FROM payments WHERE student_id=?`).run(id);
-  db.prepare(`DELETE FROM attendance WHERE student_id=?`).run(id);
-  db.prepare(`DELETE FROM students WHERE id=?`).run(id);});tx();
-  res.redirect('/students');
+/* ---- Unpaid (skip free-card students) ---- */
+app.get('/unpaid',(req,res)=>{
+  const m = monthKey();
+  const rows = db.prepare(`
+    SELECT s.id,s.name,s.phone,s.grade,s.is_free,c.id AS class_id
+      FROM students s
+ LEFT JOIN classes c ON c.title=s.grade
+ LEFT JOIN payments p ON p.student_id=s.id AND p.class_id=c.id AND p.month=?
+     WHERE p.id IS NULL AND (s.is_free IS NULL OR s.is_free=0)
+  ORDER BY s.grade,s.name`).all(m);
+  const body = `
+  <section class="card">
+    <div style="overflow:auto">
+      <table><thead><tr><th>Name</th><th>Class</th><th>Phone</th><th>Action</th></tr></thead>
+      <tbody>${
+        rows.map(r=>{
+          const token = db.prepare(`SELECT qr_token FROM students WHERE id=?`).get(r.id)?.qr_token || '';
+          return `<tr><td>${r.name}</td><td>${r.grade}</td><td>${r.phone||''}</td>
+                  <td><a role="button" class="muted" href="/pay?token=${encodeURIComponent(token)}">Mark Paid</a></td></tr>`;
+        }).join('')
+      }</tbody></table>
+    </div>
+  </section>`;
+  res.send(page('Unpaid Students', body));
 });
 
-/* ---- QR print ---- */
-app.get('/students/:id/qr',async(req,res)=>{
-  const s=db.prepare(`SELECT * FROM students WHERE id=?`).get(req.params.id);
-  if(!s)return res.send('Not found');
-  const img=await QRCode.toDataURL(`${BASE}/scan/${s.qr_token}`);
-  res.send(`<!doctype html><html><body style="text-align:center"><h2>${s.name}</h2><img src="${img}" width="250"><br><button onclick="window.print()">Print</button></body></html>`);
+/* ---- Finance + record payment ---- */
+app.get('/finance',(req,res)=>{
+  const m = req.query.month && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : monthKey();
+  const rows = db.prepare(`
+    SELECT c.title AS class, COUNT(p.id) AS cnt, COALESCE(SUM(p.amount),0) AS sum
+      FROM classes c LEFT JOIN payments p ON p.class_id=c.id AND p.month=?
+     WHERE c.title IN (${CORE_CLASSES.map(()=>'?').join(',')})
+  GROUP BY c.id ORDER BY c.title`).all(m, ...CORE_CLASSES);
+  const total = rows.reduce((t,r)=>t + (r.sum||0), 0);
+  const body = `
+  <section class="card">
+    <form method="get" action="/finance" class="row">
+      <label>Month <input name="month" value="${m}" pattern="\\d{4}-\\d{2}" required></label>
+      <button type="submit">Show</button>
+    </form>
+    <div style="overflow:auto;margin-top:.6rem">
+      <table><thead><tr><th>Class</th><th>Payments</th><th>Revenue (Rs.)</th></tr></thead>
+      <tbody>${rows.map(r=>`<tr><td>${r.class}</td><td>${r.cnt||0}</td><td>${r.sum||0}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="2" style="text-align:right"><strong>Total</strong></td><td><strong>${total}</strong></td></tr></tfoot>
+      </table>
+    </div>
+  </section>`;
+  res.send(page('Finance', body));
 });
 
-/* ---- Scanner ---- */
-app.get('/scanner',(req,res)=>{
-  const body=`<div id="notification"></div>
-  <audio id="beep" src="https://actions.google.com/sounds/v1/cartoon/wood_plank_flicks.ogg"></audio>
-  <div id="reader" style="max-width:400px;margin:auto"></div>
-  <div id="actions" style="text-align:center;margin-top:1rem;display:none">
-  <a id="payBtn" href="#" role="button">Record Payment</a></div>
-  <script src="https://unpkg.com/html5-qrcode"></script>
-  <script>
-  const beep=()=>{document.getElementById('beep').play()};
-  const note=(t,m)=>{const n=document.getElementById('notification');n.innerText=m;n.style.display='block';setTimeout(()=>n.style.display='none',2000)};
-  async function mark(token){try{const r=await fetch('/scan/'+token+'/auto',{method:'POST'});const d=await r.json();
-    if(d.ok){note('ok','Marked '+d.student.name);beep();if(d.token){const p=document.getElementById('payBtn');p.href='/pay?token='+d.token;document.getElementById('actions').style.display='block';}}
-    else note('err',d.error||d.warning);}catch{note('err','error');}}
-  const sc=new Html5QrcodeScanner('reader',{fps:10,qrbox:250});
-  sc.render(txt=>mark(txt.split('/').pop()));
-  </script>`;
-  res.send(page('Scanner',body));
-});
-/* ---- Record payment ---- */
 app.get('/pay',(req,res)=>{
   try{
-    const sid = unsign(req.query.token);
-    const s = db.prepare('SELECT * FROM students WHERE id=?').get(sid);
-    if(!s) return res.send('Student not found');
-
-    let c = db.prepare('SELECT * FROM classes WHERE title=?').get(s.grade);
-    if(!c){
-      db.prepare('INSERT INTO classes(title)VALUES(?)').run(s.grade);
-      c = db.prepare('SELECT * FROM classes WHERE title=?').get(s.grade);
-    }
-
-    const m = monthKey();
-    const already = db.prepare('SELECT 1 FROM payments WHERE student_id=? AND class_id=? AND month=?').get(s.id,c.id,m);
-    const body = `<section class="card">
+    const sid = unsign(String(req.query.token||''));
+    const s = db.prepare(`SELECT * FROM students WHERE id=?`).get(sid);
+    if(!s) return res.status(404).send('Not found');
+    let c = db.prepare(`SELECT * FROM classes WHERE title=?`).get(s.grade);
+    if(!c){ db.prepare(`INSERT INTO classes(title) VALUES(?)`).run(s.grade); c = db.prepare(`SELECT * FROM classes WHERE title=?`).get(s.grade); }
+    const m = req.query.month && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : monthKey();
+    const already = !!db.prepare(`SELECT 1 FROM payments WHERE student_id=? AND class_id=? AND month=?`).get(sid,c.id,m);
+    const body = `
+    <section class="card">
       <h3>${s.name}</h3>
-      <p>${s.grade} ${s.phone ? '· '+s.phone : ''}</p>
-      <form method="post" action="/pay">
+      <p class="small">${s.grade}${s.phone ? ' · ' + s.phone : ''}</p>
+      <form method="post" action="/pay" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem">
         <input type="hidden" name="token" value="${req.query.token}">
         <input type="hidden" name="class_id" value="${c.id}">
-        <label>Month<input name="month" value="${m}" required></label>
-        <label>Amount<input name="amount" value="${c.fee||2000}" required></label>
+        <label>Month (YYYY-MM)<input name="month" value="${m}" pattern="\\d{4}-\\d{2}" required></label>
+        <label>Amount (Rs.)<input type="number" min="0" name="amount" value="${c.fee||2000}" required></label>
         <label>Method
           <select name="method"><option>cash</option><option>bank</option><option>online</option></select>
         </label>
-        <button>${already?'Update':'Save'} Payment</button>
+        <div style="grid-column:1/-1;display:flex;gap:.8rem">
+          <button type="submit">${already?'Update':'Save'} Payment</button>
+          <a role="button" class="muted" href="/unpaid?month=${encodeURIComponent(m)}">Back</a>
+        </div>
       </form>
     </section>`;
     res.send(page('Record Payment', body));
-  } catch {
-    res.send('Invalid token');
-  }
+  }catch{ res.status(400).send('Bad token'); }
 });
 
 app.post('/pay',(req,res)=>{
   try{
-    const sid = unsign(req.body.token);
-    const m   = req.body.month || monthKey();
-    db.prepare(`INSERT INTO payments(student_id,class_id,month,amount,method)
+    const sid = unsign(String(req.body.token||''));
+    const classId = Number(req.body.class_id);
+    const m   = (req.body.month && /^\d{4}-\d{2}$/.test(req.body.month)) ? req.body.month : monthKey();
+    const amt = Math.max(0, Number(req.body.amount||0));
+    const method = (req.body.method||'cash').toString();
+
+    db.prepare(`
+      INSERT INTO payments(student_id,class_id,month,amount,method)
       VALUES(?,?,?,?,?)
-      ON CONFLICT(student_id,class_id,month)
-      DO UPDATE SET amount=excluded.amount,method=excluded.method`)
-      .run(sid, req.body.class_id, m, req.body.amount, req.body.method);
-    res.redirect('/unpaid');
-  } catch {
-    res.send('Payment error');
-  }
+      ON CONFLICT(student_id,class_id,month) DO UPDATE
+      SET amount=excluded.amount, method=excluded.method
+    `).run(sid,classId,m,amt,method);
+
+    res.redirect(`/unpaid?month=${encodeURIComponent(m)}`);
+  }catch{ res.status(400).send('Bad token'); }
 });
 
-/* ---- Settings: DB download/upload ---- */
+/* ================== DB Download / Upload (Settings) ================== */
 const upload = multer({
-  dest: path.join(__dirname,'uploads'),
-  limits: { fileSize: 50 * 1024 * 1024 }
+  dest: path.join(__dirname, 'uploads'),
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB
 });
 
 app.get('/settings',(req,res)=>{
-  const body = `<section class="card">
-    <a role="button" href="/admin/db/download">Download Database</a>
-    <form method="post" action="/admin/db/upload" enctype="multipart/form-data">
-      <input type="file" name="dbfile" required>
-      <button>Upload & Replace</button>
-    </form>
-    <p style="margin-top:.5rem;font-size:.9em">Uploading replaces the current DB file but keeps your structure (auto-adds <code>is_free</code> column if missing).</p>
+  const banner = req.query.ok==='1' ? 'Settings saved / Database updated.' : '';
+  const body = `
+  <section class="card">
+    <h3>Database</h3>
+    <div style="display:flex;gap:.8rem;flex-wrap:wrap">
+      <a role="button" class="muted" href="/admin/db/download">Download database</a>
+      <form method="post" action="/admin/db/upload" enctype="multipart/form-data" style="display:flex;gap:.6rem;flex-wrap:wrap">
+        <input type="file" name="dbfile" accept=".db,.sqlite,application/octet-stream" required>
+        <button type="submit">Upload & Replace</button>
+      </form>
+    </div>
+    <p class="small" style="margin-top:.6rem">Uploading a SQLite <code>.db</code> replaces the current file. We auto-migrate to include <code>is_free</code> if missing. No reset.</p>
   </section>`;
-  res.send(page('Settings', body));
+  res.send(page('Settings', body, banner));
 });
 
 app.get('/admin/db/download',(req,res)=>{
-  if(!fs.existsSync(DB_PATH)) return res.send('Database not found');
-  res.setHeader('Content-Disposition','attachment; filename="class_manager.sqlite"');
-  fs.createReadStream(DB_PATH).pipe(res);
+  try{
+    if(!fs.existsSync(DB_PATH)) return res.status(404).send('DB not found');
+    res.setHeader('Content-Type','application/octet-stream');
+    res.setHeader('Content-Disposition','attachment; filename="class_manager.sqlite"');
+    fs.createReadStream(DB_PATH).pipe(res);
+  }catch(e){
+    res.status(500).send('Failed to download DB');
+  }
 });
 
 app.post('/admin/db/upload', upload.single('dbfile'), (req,res)=>{
   try{
-    db.close();
+    if(!req.file) return res.status(400).send('No file');
+    try{ db.close(); }catch{}
+    const backup = DB_PATH + '.bak';
+    if (fs.existsSync(DB_PATH)) fs.copyFileSync(DB_PATH, backup);
     fs.copyFileSync(req.file.path, DB_PATH);
     db = openDb();
-    fs.unlinkSync(req.file.path);
-    res.redirect('/settings');
-  } catch {
-    res.send('Upload failed');
+    try{ fs.unlinkSync(req.file.path); }catch{}
+    return res.redirect('/settings?ok=1');
+  }catch(e){
+    try{
+      if (fs.existsSync(DB_PATH + '.bak')) fs.copyFileSync(DB_PATH + '.bak', DB_PATH);
+      db = openDb();
+    }catch{}
+    return res.status(500).send('Upload failed');
   }
 });
 
-/* ---- Start server ---- */
-app.listen(PORT, ()=> console.log(`✅ Class Manager running at ${BASE} (DB: ${DB_PATH})`));
+/* ================== Start ================== */
+app.listen(PORT,()=>console.log(`✅ Class Manager running at ${BASE} (DB: ${DB_PATH})`));
