@@ -37,32 +37,34 @@ function openDb() {
 function initDb(d){
   d.prepare(`CREATE TABLE IF NOT EXISTS students(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT, phone TEXT, grade TEXT,
+    name TEXT NOT NULL,
+    phone TEXT,
+    grade TEXT NOT NULL,
     qr_token TEXT UNIQUE
   )`).run();
 
   d.prepare(`CREATE TABLE IF NOT EXISTS classes(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT UNIQUE, fee INTEGER DEFAULT 2000
-  )`).run();
-
-  d.prepare(`CREATE TABLE IF NOT EXISTS enrollments(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id INTEGER, class_id INTEGER,
-    UNIQUE(student_id,class_id)
+    title TEXT UNIQUE NOT NULL,
+    fee INTEGER NOT NULL DEFAULT 2000
   )`).run();
 
   d.prepare(`CREATE TABLE IF NOT EXISTS attendance(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id INTEGER, class_id INTEGER,
-    date TEXT, present INTEGER DEFAULT 1,
+    student_id INTEGER NOT NULL,
+    class_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    present INTEGER NOT NULL DEFAULT 1,
     UNIQUE(student_id,class_id,date)
   )`).run();
 
   d.prepare(`CREATE TABLE IF NOT EXISTS payments(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    student_id INTEGER, class_id INTEGER, month TEXT,
-    amount INTEGER DEFAULT 2000, method TEXT DEFAULT 'cash',
+    student_id INTEGER NOT NULL,
+    class_id INTEGER NOT NULL,
+    month TEXT NOT NULL,
+    amount INTEGER NOT NULL DEFAULT 2000,
+    method TEXT DEFAULT 'cash',
     created_at TEXT DEFAULT(datetime('now')),
     UNIQUE(student_id,class_id,month)
   )`).run();
@@ -71,11 +73,14 @@ function initDb(d){
 function migrateDb(d){
   // Add missing columns/indexes safely (no reset)
   try { d.prepare(`ALTER TABLE students ADD COLUMN is_free INTEGER DEFAULT 0`).run(); } catch {}
+  // Ensure core classes exist
+  const have = new Set(d.prepare(`SELECT title FROM classes`).all().map(r=>r.title));
+  for (const t of CORE_CLASSES) if (!have.has(t)) d.prepare(`INSERT INTO classes(title,fee) VALUES(?,2000)`).run(t);
 }
 
 /* ================== Helpers ================== */
 const todayISO = () => new Date().toISOString().slice(0,10);
-const monthKey = () => new Date().toISOString().slice(0,7);
+const monthKey = (d=new Date()) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 
 function signId(id){
   const payload = JSON.stringify({sid:id});
@@ -96,10 +101,7 @@ function page(title, body, banner=''){
   <title>${title}</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@1/css/pico.min.css">
   <style>
-  :root{
-    --card:#0b1220; --text:#e8eef8; --muted:#9fb4cb; --border:#1f2a44;
-    --chip:#0f172a; --chip-hover:#12203a;
-  }
+  :root{--card:#0b1220;--text:#e8eef8;--muted:#9fb4cb;--border:#1f2a44;--chip:#0f172a;--chip-hover:#12203a}
   html,body{background:#0a0f1a;color:var(--text)}
   .container{max-width:1080px;padding-inline:16px}
   header.nav{display:flex;flex-wrap:wrap;justify-content:center;gap:.6rem;margin-top:1rem}
@@ -138,26 +140,37 @@ app.get('/',(r,s)=>s.redirect('/students'));
 /* ---- Students list ---- */
 app.get('/students',(req,res)=>{
   const list = db.prepare(`SELECT * FROM students ORDER BY grade,name`).all();
-  const body = `<a href="/students/new">Add Student</a>
+  const body = `<a role="button" class="muted" href="/students/new">Add Student</a>
+  <div style="overflow:auto;margin-top:.6rem">
   <table><thead><tr><th>Name</th><th>Grade</th><th>Phone</th><th>Free</th><th>QR</th><th>Actions</th></tr></thead>
   <tbody>${list.map(s=>`<tr>
     <td>${s.name}</td><td>${s.grade}</td><td>${s.phone||''}</td>
     <td>${s.is_free?'🆓':''}</td>
-    <td><a href="/students/${s.id}/qr">QR</a></td>
-    <td><a href="/students/${s.id}/edit">Edit</a></td>
-  </tr>`).join('')}</tbody></table>`;
+    <td><a role="button" class="muted" href="/students/${s.id}/qr">QR</a></td>
+    <td style="display:flex;gap:.4rem;flex-wrap:wrap">
+      <a role="button" class="muted" href="/students/${s.id}/edit">Edit</a>
+      <form method="post" action="/students/${s.id}/delete" onsubmit="return confirm('Delete ${s.name}?')">
+        <button class="secondary" style="background:#2a0f14;border-color:#7a2030;color:#ffd7db">Delete</button>
+      </form>
+    </td>
+  </tr>`).join('')}</tbody></table></div>`;
   res.send(page('Students', body));
 });
 
 /* ---- Add student ---- */
 app.get('/students/new',(req,res)=>res.send(page('Add Student',`
-  <form method="post" action="/students/new">
-    <label>Name<input name="name" required></label>
-    <label>Phone<input name="phone"></label>
-    <label>Grade<select name="grade"><option>Grade 6</option><option>Grade 7</option><option>Grade 8</option><option>O/L</option></select></label>
-    <label><input type="checkbox" name="is_free"> Free card</label>
-    <button type="submit">Save</button>
-  </form>`)));
+  <section class="card">
+    <form method="post" action="/students/new" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem">
+      <label>Name<input name="name" required></label>
+      <label>Phone<input name="phone"></label>
+      <label>Grade<select name="grade"><option>Grade 6</option><option>Grade 7</option><option>Grade 8</option><option>O/L</option></select></label>
+      <label style="align-self:end"><input type="checkbox" name="is_free"> Free card</label>
+      <div style="grid-column:1/-1;display:flex;gap:.8rem">
+        <button type="submit">Save</button>
+        <a role="button" class="muted" href="/students">Cancel</a>
+      </div>
+    </form>
+  </section>`)));
 app.post('/students/new',(req,res)=>{
   const {name,phone,grade}=req.body; const is_free = req.body.is_free?1:0;
   const r = db.prepare(`INSERT INTO students(name,phone,grade,is_free) VALUES(?,?,?,?)`).run(name,phone,grade,is_free);
@@ -171,7 +184,8 @@ app.get('/students/:id/edit',(req,res)=>{
   const s = db.prepare(`SELECT * FROM students WHERE id=?`).get(req.params.id);
   if(!s) return res.send('Not found');
   res.send(page('Edit Student',`
-    <form method="post" action="/students/${s.id}/edit">
+  <section class="card">
+    <form method="post" action="/students/${s.id}/edit" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem">
       <label>Name<input name="name" value="${s.name}" required></label>
       <label>Phone<input name="phone" value="${s.phone||''}"></label>
       <label>Grade<select name="grade">
@@ -180,13 +194,29 @@ app.get('/students/:id/edit',(req,res)=>{
         <option${s.grade==='Grade 8'?' selected':''}>Grade 8</option>
         <option${s.grade==='O/L'?' selected':''}>O/L</option>
       </select></label>
-      <label><input type="checkbox" name="is_free"${s.is_free?' checked':''}> Free card</label>
-      <button type="submit">Save</button> <a href="/students" role="button" class="muted">Back</a>
-    </form>`));
+      <label style="align-self:end"><input type="checkbox" name="is_free"${s.is_free?' checked':''}> Free card</label>
+      <div style="grid-column:1/-1;display:flex;gap:.8rem">
+        <button type="submit">Save</button>
+        <a role="button" class="muted" href="/students">Back</a>
+      </div>
+    </form>
+  </section>`));
 });
 app.post('/students/:id/edit',(req,res)=>{
   const {name,phone,grade}=req.body; const is_free=req.body.is_free?1:0;
   db.prepare(`UPDATE students SET name=?,phone=?,grade=?,is_free=? WHERE id=?`).run(name,phone,grade,is_free,req.params.id);
+  res.redirect('/students');
+});
+
+/* ---- Delete student ---- */
+app.post('/students/:id/delete',(req,res)=>{
+  const id = Number(req.params.id);
+  const tx = db.transaction(()=>{
+    db.prepare(`DELETE FROM payments WHERE student_id=?`).run(id);
+    db.prepare(`DELETE FROM attendance WHERE student_id=?`).run(id);
+    db.prepare(`DELETE FROM students WHERE id=?`).run(id);
+  });
+  tx();
   res.redirect('/students');
 });
 
@@ -255,10 +285,18 @@ app.get('/attendance-sheet',(req,res)=>{
   const clazz = db.prepare(`SELECT * FROM classes WHERE title=?`).get(classTitle);
   const students = db.prepare(`SELECT s.* FROM students s WHERE s.grade=? ORDER BY s.name`).all(classTitle);
   const present = new Set(db.prepare(`SELECT student_id FROM attendance WHERE class_id=? AND date=?`).all(clazz?.id||0,date).map(r=>r.student_id));
-  const body = `<form><label>Class<select name="class">${classes.map(c=>`<option ${c.title===classTitle?'selected':''}>${c.title}</option>`).join('')}</select></label>
-  <label>Date<input type="date" name="date" value="${date}"></label><button>Show</button></form>
-  <table><thead><tr><th>Present</th><th>Name</th><th>Phone</th><th>Free</th></tr></thead><tbody>
-  ${students.map(s=>`<tr><td>${present.has(s.id)?'Yes':'—'}</td><td>${s.name}</td><td>${s.phone||''}</td><td>${s.is_free?'🆓':''}</td></tr>`).join('')}</tbody></table>`;
+  const body = `
+  <section class="card">
+    <form method="get" action="/attendance-sheet" style="display:flex;gap:.8rem;flex-wrap:wrap;align-items:end">
+      <label>Class <select name="class">${classes.map(c=>`<option ${c.title===classTitle?'selected':''}>${c.title}</option>`).join('')}</select></label>
+      <label>Date <input type="date" name="date" value="${date}"></label>
+      <button type="submit">Show</button>
+    </form>
+    <div style="overflow:auto;margin-top:.6rem">
+      <table><thead><tr><th>Present</th><th>Name</th><th>Phone</th><th>Free</th></tr></thead>
+      <tbody>${students.map(s=>`<tr><td>${present.has(s.id)?'Yes':'—'}</td><td>${s.name}</td><td>${s.phone||''}</td><td>${s.is_free?'🆓':''}</td></tr>`).join('')}</tbody></table>
+    </div>
+  </section>`;
   res.send(page('Attendance', body));
 });
 
@@ -272,28 +310,105 @@ app.get('/unpaid',(req,res)=>{
  LEFT JOIN payments p ON p.student_id=s.id AND p.class_id=c.id AND p.month=?
      WHERE p.id IS NULL AND (s.is_free IS NULL OR s.is_free=0)
   ORDER BY s.grade,s.name`).all(m);
-  const body = `<table><thead><tr><th>Name</th><th>Class</th><th>Phone</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${r.name}</td><td>${r.grade}</td><td>${r.phone||''}</td></tr>`).join('')}
-  </tbody></table>`;
+  const body = `
+  <section class="card">
+    <div style="overflow:auto">
+      <table><thead><tr><th>Name</th><th>Class</th><th>Phone</th><th>Action</th></tr></thead>
+      <tbody>${
+        rows.map(r=>{
+          const token = db.prepare(`SELECT qr_token FROM students WHERE id=?`).get(r.id)?.qr_token || '';
+          return `<tr><td>${r.name}</td><td>${r.grade}</td><td>${r.phone||''}</td>
+                  <td><a role="button" class="muted" href="/pay?token=${encodeURIComponent(token)}">Mark Paid</a></td></tr>`;
+        }).join('')
+      }</tbody></table>
+    </div>
+  </section>`;
   res.send(page('Unpaid Students', body));
 });
 
-/* ---- Finance ---- */
+/* ---- Finance + record payment ---- */
 app.get('/finance',(req,res)=>{
-  const m = monthKey();
-  const total = db.prepare(`SELECT COALESCE(SUM(amount),0) AS t FROM payments WHERE month=?`).get(m).t || 0;
-  res.send(page('Finance', `<p>Total income for ${m}: <strong>Rs. ${total}</strong></p>`));
+  const m = req.query.month && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : monthKey();
+  const rows = db.prepare(`
+    SELECT c.title AS class, COUNT(p.id) AS cnt, COALESCE(SUM(p.amount),0) AS sum
+      FROM classes c LEFT JOIN payments p ON p.class_id=c.id AND p.month=?
+     WHERE c.title IN (${CORE_CLASSES.map(()=>'?').join(',')})
+  GROUP BY c.id ORDER BY c.title`).all(m, ...CORE_CLASSES);
+  const total = rows.reduce((t,r)=>t + (r.sum||0), 0);
+  const body = `
+  <section class="card">
+    <form method="get" action="/finance" style="display:flex;gap:.8rem;flex-wrap:wrap;align-items:end">
+      <label>Month <input name="month" value="${m}" pattern="\\d{4}-\\d{2}" required></label>
+      <button type="submit">Show</button>
+    </form>
+    <div style="overflow:auto;margin-top:.6rem">
+      <table><thead><tr><th>Class</th><th>Payments</th><th>Revenue (Rs.)</th></tr></thead>
+      <tbody>${rows.map(r=>`<tr><td>${r.class}</td><td>${r.cnt||0}</td><td>${r.sum||0}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td colspan="2" style="text-align:right"><strong>Total</strong></td><td><strong>${total}</strong></td></tr></tfoot>
+      </table>
+    </div>
+  </section>`;
+  res.send(page('Finance', body));
+});
+
+app.get('/pay',(req,res)=>{
+  try{
+    const sid = unsign(String(req.query.token||''));
+    const s = db.prepare(`SELECT * FROM students WHERE id=?`).get(sid);
+    if(!s) return res.status(404).send('Not found');
+    let c = db.prepare(`SELECT * FROM classes WHERE title=?`).get(s.grade);
+    if(!c){ db.prepare(`INSERT INTO classes(title) VALUES(?)`).run(s.grade); c = db.prepare(`SELECT * FROM classes WHERE title=?`).get(s.grade); }
+    const m = req.query.month && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : monthKey();
+    const already = !!db.prepare(`SELECT 1 FROM payments WHERE student_id=? AND class_id=? AND month=?`).get(sid,c.id,m);
+    const body = `
+    <section class="card">
+      <h3>${s.name}</h3>
+      <p class="small">${s.grade}${s.phone ? ' · ' + s.phone : ''}</p>
+      <form method="post" action="/pay" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem">
+        <input type="hidden" name="token" value="${req.query.token}">
+        <input type="hidden" name="class_id" value="${c.id}">
+        <label>Month (YYYY-MM)<input name="month" value="${m}" pattern="\\d{4}-\\d{2}" required></label>
+        <label>Amount (Rs.)<input type="number" min="0" name="amount" value="${c.fee||2000}" required></label>
+        <label>Method
+          <select name="method"><option>cash</option><option>bank</option><option>online</option></select>
+        </label>
+        <div style="grid-column:1/-1;display:flex;gap:.8rem">
+          <button type="submit">${already?'Update':'Save'} Payment</button>
+          <a role="button" class="muted" href="/unpaid?month=${encodeURIComponent(m)}">Back</a>
+        </div>
+      </form>
+    </section>`;
+    res.send(page('Record Payment', body));
+  }catch{ res.status(400).send('Bad token'); }
+});
+
+app.post('/pay',(req,res)=>{
+  try{
+    const sid = unsign(String(req.body.token||'')); // throws on invalid
+    const classId = Number(req.body.class_id);
+    const m   = (req.body.month && /^\d{4}-\d{2}$/.test(req.body.month)) ? req.body.month : monthKey();
+    const amt = Math.max(0, Number(req.body.amount||0));
+    const method = (req.body.method||'cash').toString();
+
+    db.prepare(`
+      INSERT INTO payments(student_id,class_id,month,amount,method)
+      VALUES(?,?,?,?,?)
+      ON CONFLICT(student_id,class_id,month) DO UPDATE
+      SET amount=excluded.amount, method=excluded.method
+    `).run(sid,classId,m,amt,method);
+
+    res.redirect(`/unpaid?month=${encodeURIComponent(m)}`);
+  }catch{ res.status(400).send('Bad token'); }
 });
 
 /* ================== DB Download / Upload (Settings) ================== */
-
 const upload = multer({
   dest: path.join(__dirname, 'uploads'),
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB
 });
 
 app.get('/settings',(req,res)=>{
-  const banner = req.query.ok==='1' ? 'Settings saved / DB updated.' : '';
+  const banner = req.query.ok==='1' ? 'Settings saved / Database updated.' : '';
   const body = `
   <section class="card">
     <h3>Database</h3>
@@ -304,7 +419,7 @@ app.get('/settings',(req,res)=>{
         <button type="submit">Upload & Replace</button>
       </form>
     </div>
-    <p class="small" style="margin-top:.6rem">Uploading a .db file replaces the current database file. We’ll auto-migrate (adds <code>is_free</code> column if missing). Your app won’t reset.</p>
+    <p class="small" style="margin-top:.6rem">Uploading a SQLite <code>.db</code> replaces the current file. We auto-migrate to include <code>is_free</code> if missing. No reset.</p>
   </section>`;
   res.send(page('Settings', body, banner));
 });
@@ -323,20 +438,14 @@ app.get('/admin/db/download',(req,res)=>{
 app.post('/admin/db/upload', upload.single('dbfile'), (req,res)=>{
   try{
     if(!req.file) return res.status(400).send('No file');
-    // close current db to replace file
     try{ db.close(); }catch{}
-    // backup current db
     const backup = DB_PATH + '.bak';
     if (fs.existsSync(DB_PATH)) fs.copyFileSync(DB_PATH, backup);
-    // replace with uploaded
     fs.copyFileSync(req.file.path, DB_PATH);
-    // reopen + migrate
     db = openDb();
-    // cleanup temp file
     try{ fs.unlinkSync(req.file.path); }catch{}
     return res.redirect('/settings?ok=1');
   }catch(e){
-    // attempt to restore backup on failure
     try{
       if (fs.existsSync(DB_PATH + '.bak')) fs.copyFileSync(DB_PATH + '.bak', DB_PATH);
       db = openDb();
