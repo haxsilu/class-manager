@@ -71,9 +71,7 @@ function initDb(d){
 }
 
 function migrateDb(d){
-  // Add missing columns/indexes safely (no reset)
   try { d.prepare(`ALTER TABLE students ADD COLUMN is_free INTEGER DEFAULT 0`).run(); } catch {}
-  // Ensure core classes exist
   const have = new Set(d.prepare(`SELECT title FROM classes`).all().map(r=>r.title));
   for (const t of CORE_CLASSES) if (!have.has(t)) d.prepare(`INSERT INTO classes(title,fee) VALUES(?,2000)`).run(t);
 }
@@ -137,7 +135,6 @@ function page(title, body, banner=''){
 /* ================== Routes ================== */
 app.get('/',(r,s)=>s.redirect('/students'));
 
-/* ---- Students list ---- */
 app.get('/students',(req,res)=>{
   const list = db.prepare(`SELECT * FROM students ORDER BY grade,name`).all();
   const body = `<a role="button" class="muted" href="/students/new">Add Student</a>
@@ -157,7 +154,6 @@ app.get('/students',(req,res)=>{
   res.send(page('Students', body));
 });
 
-/* ---- Add student ---- */
 app.get('/students/new',(req,res)=>res.send(page('Add Student',`
   <section class="card">
     <form method="post" action="/students/new" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem">
@@ -179,7 +175,6 @@ app.post('/students/new',(req,res)=>{
   res.redirect('/students');
 });
 
-/* ---- Edit student ---- */
 app.get('/students/:id/edit',(req,res)=>{
   const s = db.prepare(`SELECT * FROM students WHERE id=?`).get(req.params.id);
   if(!s) return res.send('Not found');
@@ -208,7 +203,6 @@ app.post('/students/:id/edit',(req,res)=>{
   res.redirect('/students');
 });
 
-/* ---- Delete student ---- */
 app.post('/students/:id/delete',(req,res)=>{
   const id = Number(req.params.id);
   const tx = db.transaction(()=>{
@@ -220,7 +214,6 @@ app.post('/students/:id/delete',(req,res)=>{
   res.redirect('/students');
 });
 
-/* ---- Minimal QR print (name + QR only) ---- */
 app.get('/students/:id/qr', async (req,res)=>{
   const s = db.prepare(`SELECT * FROM students WHERE id=?`).get(req.params.id);
   if(!s) return res.send('Not found');
@@ -230,7 +223,6 @@ app.get('/students/:id/qr', async (req,res)=>{
     <body><h2>${s.name}</h2><img src="${img}" width="300"><br><button onclick="window.print()">Print</button></body></html>`);
 });
 
-/* ---- Scanner with notification & sounds ---- */
 app.get('/scanner',(req,res)=>{
   const body = `
   <div id="notification"></div>
@@ -277,7 +269,6 @@ app.post('/scan/:token/auto',(req,res)=>{
   }catch{ res.json({ok:false,error:'Bad token'}); }
 });
 
-/* ---- Attendance sheet ---- */
 app.get('/attendance-sheet',(req,res)=>{
   const classes = db.prepare(`SELECT * FROM classes WHERE title IN (${CORE_CLASSES.map(()=>'?').join(',')}) ORDER BY title`).all(...CORE_CLASSES);
   const classTitle = req.query.class && CORE_CLASSES.includes(req.query.class) ? req.query.class : (classes[0]?.title || 'Grade 6');
@@ -300,7 +291,6 @@ app.get('/attendance-sheet',(req,res)=>{
   res.send(page('Attendance', body));
 });
 
-/* ---- Unpaid (skip free-card students) ---- */
 app.get('/unpaid',(req,res)=>{
   const m = monthKey();
   const rows = db.prepare(`
@@ -326,7 +316,6 @@ app.get('/unpaid',(req,res)=>{
   res.send(page('Unpaid Students', body));
 });
 
-/* ---- Finance + record payment ---- */
 app.get('/finance',(req,res)=>{
   const m = req.query.month && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : monthKey();
   const rows = db.prepare(`
@@ -338,7 +327,7 @@ app.get('/finance',(req,res)=>{
   const body = `
   <section class="card">
     <form method="get" action="/finance" style="display:flex;gap:.8rem;flex-wrap:wrap;align-items:end">
-      <label>Month <input name="month" value="${m}" pattern="\\d{4}-\\d{2}" required></label>
+      <label>Month <input name="month" value="${m}" pattern="\d{4}-\d{2}" required></label>
       <button type="submit">Show</button>
     </form>
     <div style="overflow:auto;margin-top:.6rem">
@@ -367,7 +356,7 @@ app.get('/pay',(req,res)=>{
       <form method="post" action="/pay" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem">
         <input type="hidden" name="token" value="${req.query.token}">
         <input type="hidden" name="class_id" value="${c.id}">
-        <label>Month (YYYY-MM)<input name="month" value="${m}" pattern="\\d{4}-\\d{2}" required></label>
+        <label>Month (YYYY-MM)<input name="month" value="${m}" pattern="\d{4}-\d{2}" required></label>
         <label>Amount (Rs.)<input type="number" min="0" name="amount" value="${c.fee||2000}" required></label>
         <label>Method
           <select name="method"><option>cash</option><option>bank</option><option>online</option></select>
@@ -384,7 +373,7 @@ app.get('/pay',(req,res)=>{
 
 app.post('/pay',(req,res)=>{
   try{
-    const sid = unsign(String(req.body.token||'')); // throws on invalid
+    const sid = unsign(String(req.body.token||''));
     const classId = Number(req.body.class_id);
     const m   = (req.body.month && /^\d{4}-\d{2}$/.test(req.body.month)) ? req.body.month : monthKey();
     const amt = Math.max(0, Number(req.body.amount||0));
@@ -401,10 +390,9 @@ app.post('/pay',(req,res)=>{
   }catch{ res.status(400).send('Bad token'); }
 });
 
-/* ================== DB Download / Upload (Settings) ================== */
 const upload = multer({
   dest: path.join(__dirname, 'uploads'),
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB
+  limits: { fileSize: 50 * 1024 * 1024 }
 });
 
 app.get('/settings',(req,res)=>{
@@ -454,5 +442,4 @@ app.post('/admin/db/upload', upload.single('dbfile'), (req,res)=>{
   }
 });
 
-/* ================== Start ================== */
 app.listen(PORT,()=>console.log(`✅ Class Manager running at ${BASE} (DB: ${DB_PATH})`));
