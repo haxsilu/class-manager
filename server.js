@@ -1,4 +1,3 @@
-
 // Full Class Manager Backend (complete server.js)
 // Features: Students CRUD, Free-card, QR Print, Scanner w sound, Attendance auto/manual,
 // Finance, Unpaid, Payment system, DB download/upload, Dark UI, Mobile optimized, Railway-ready
