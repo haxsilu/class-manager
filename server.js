@@ -1,33 +1,26 @@
 // server.js
-// -----------------------------------------------------------------------------
-// Single-file Class Payment System
-// Backend: Node.js (ESM), Express, SQLite (better-sqlite3)
-// Frontend: Simple HTML + JS using fetch()
-// -----------------------------------------------------------------------------
+// Single-file Class Payment System (Backend + Frontend)
 
-import 'dotenv/config';
-import express from 'express';
-import Database from 'better-sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
+// Backend: Node.js, Express, SQLite (better-sqlite3)
+// Frontend: Simple HTML+JS dashboard (no build tools)
 
-// -----------------------------------------------------------------------------
-// Runtime setup
-// -----------------------------------------------------------------------------
+import express from "express";
+import Database from "better-sqlite3";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// ---------- Runtime setup ----------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DB_PATH =
-  process.env.DB_PATH || path.join(__dirname, 'class_payments.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "class_payments.db");
 const PORT = Number(process.env.PORT || 5050);
 
-// -----------------------------------------------------------------------------
-// Database
-// -----------------------------------------------------------------------------
+// ---------- Database ----------
 function openDb() {
   const db = new Database(DB_PATH);
-  db.pragma('journal_mode = wal');
-  db.pragma('foreign_keys = ON');
+  db.pragma("journal_mode = wal");
+  db.pragma("foreign_keys = ON");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS students (
@@ -77,51 +70,50 @@ function openDb() {
 
 const db = openDb();
 
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
-const monthKey = (d = new Date()) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+// ---------- Helpers ----------
+function monthKey(d = new Date()) {
+  return (
+    d.getFullYear() +
+    "-" +
+    String(d.getMonth() + 1).padStart(2, "0")
+  );
+}
 
-const isValidMonth = (m) => typeof m === 'string' && /^\d{4}-\d{2}$/.test(m);
+function isValidMonth(m) {
+  return typeof m === "string" && /^\d{4}-\d{2}$/.test(m);
+}
 
-const toId = (v, field = 'id') => {
-  const n = Number(v);
-  if (!Number.isInteger(n) || n <= 0) throw new Error(`Invalid ${field}`);
+function toId(value, field = "id") {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error("Invalid " + field);
+  }
   return n;
-};
+}
 
-const sendError = (res, code, msg) => res.status(code).json({ error: msg });
+function sendError(res, code, msg) {
+  res.status(code).json({ error: msg });
+}
 
-// -----------------------------------------------------------------------------
-// Simple "services" (just organized statements)
-// -----------------------------------------------------------------------------
+// ---------- Prepared statements (simple "services") ----------
 const studentStmt = {
-  list: db.prepare('SELECT * FROM students ORDER BY name COLLATE NOCASE'),
-  find: db.prepare('SELECT * FROM students WHERE id=?'),
-  insert: db.prepare('INSERT INTO students(name,phone) VALUES(?,?)'),
-  update: db.prepare('UPDATE students SET name=?,phone=? WHERE id=?'),
-  delete: db.prepare('DELETE FROM students WHERE id=?'),
+  list: db.prepare("SELECT * FROM students ORDER BY name COLLATE NOCASE"),
+  find: db.prepare("SELECT * FROM students WHERE id=?"),
+  insert: db.prepare("INSERT INTO students(name,phone) VALUES(?,?)"),
+  delete: db.prepare("DELETE FROM students WHERE id=?"),
 };
 
 const classStmt = {
-  list: db.prepare('SELECT * FROM classes ORDER BY name COLLATE NOCASE'),
-  find: db.prepare('SELECT * FROM classes WHERE id=?'),
+  list: db.prepare("SELECT * FROM classes ORDER BY name COLLATE NOCASE"),
+  find: db.prepare("SELECT * FROM classes WHERE id=?"),
   insert: db.prepare(
-    'INSERT INTO classes(name,monthly_fee) VALUES(?,?)'
+    "INSERT INTO classes(name,monthly_fee) VALUES(?,?)"
   ),
-  update: db.prepare(
-    'UPDATE classes SET name=?,monthly_fee=? WHERE id=?'
-  ),
-  delete: db.prepare('DELETE FROM classes WHERE id=?'),
 };
 
 const enrollStmt = {
   enroll: db.prepare(
-    'INSERT INTO enrollments(student_id,class_id) VALUES(?,?)'
-  ),
-  unenroll: db.prepare(
-    'DELETE FROM enrollments WHERE student_id=? AND class_id=?'
+    "INSERT INTO enrollments(student_id,class_id) VALUES(?,?)"
   ),
   studentsInClass: db.prepare(`
     SELECT s.*
@@ -129,13 +121,6 @@ const enrollStmt = {
     JOIN students s ON s.id = e.student_id
     WHERE e.class_id=?
     ORDER BY s.name COLLATE NOCASE
-  `),
-  classesOfStudent: db.prepare(`
-    SELECT c.*
-    FROM enrollments e
-    JOIN classes c ON c.id = e.class_id
-    WHERE e.student_id=?
-    ORDER BY c.name COLLATE NOCASE
   `),
 };
 
@@ -145,13 +130,6 @@ const paymentStmt = {
     VALUES (?,?,?,?,?)
     ON CONFLICT(student_id,class_id,month)
     DO UPDATE SET amount=excluded.amount, method=excluded.method
-  `),
-  forStudentMonth: db.prepare(`
-    SELECT p.*, c.name AS class_name
-    FROM payments p
-    JOIN classes c ON c.id = p.class_id
-    WHERE p.student_id=? AND p.month=?
-    ORDER BY c.name
   `),
   unpaid: db.prepare(`
     SELECT
@@ -174,7 +152,7 @@ const paymentStmt = {
     SELECT
       c.id   AS class_id,
       c.name AS class_name,
-      COUNT(p.id)              AS payments_count,
+      COUNT(p.id)               AS payments_count,
       COALESCE(SUM(p.amount),0) AS total_amount
     FROM classes c
     LEFT JOIN payments p
@@ -185,22 +163,21 @@ const paymentStmt = {
   `),
 };
 
-// -----------------------------------------------------------------------------
-// Express app & API routes
-// -----------------------------------------------------------------------------
+// ---------- Express app ----------
 const app = express();
 app.use(express.json());
 
-// ---- API: Students ----
-app.get('/api/students', (req, res) => {
+// --- API: Students ---
+app.get("/api/students", (req, res) => {
   res.json(studentStmt.list.all());
 });
 
-app.post('/api/students', (req, res) => {
+app.post("/api/students", (req, res) => {
   try {
-    const { name, phone } = req.body;
-    if (!name || !name.trim()) throw new Error('Name is required');
-    const info = studentStmt.insert.run(name.trim(), phone || null);
+    const name = (req.body.name || "").trim();
+    const phone = (req.body.phone || "").trim() || null;
+    if (!name) throw new Error("Name is required");
+    const info = studentStmt.insert.run(name, phone);
     const s = studentStmt.find.get(info.lastInsertRowid);
     res.status(201).json(s);
   } catch (e) {
@@ -208,7 +185,7 @@ app.post('/api/students', (req, res) => {
   }
 });
 
-app.delete('/api/students/:id', (req, res) => {
+app.delete("/api/students/:id", (req, res) => {
   try {
     const id = toId(req.params.id);
     studentStmt.delete.run(id);
@@ -218,18 +195,18 @@ app.delete('/api/students/:id', (req, res) => {
   }
 });
 
-// ---- API: Classes ----
-app.get('/api/classes', (req, res) => {
+// --- API: Classes ---
+app.get("/api/classes", (req, res) => {
   res.json(classStmt.list.all());
 });
 
-app.post('/api/classes', (req, res) => {
+app.post("/api/classes", (req, res) => {
   try {
-    const { name, monthly_fee } = req.body;
-    if (!name || !name.trim()) throw new Error('Class name required');
-    const fee = Number(monthly_fee);
-    if (!Number.isFinite(fee) || fee < 0) throw new Error('Invalid fee');
-    const info = classStmt.insert.run(name.trim(), fee);
+    const name = (req.body.name || "").trim();
+    const fee = Number(req.body.monthly_fee);
+    if (!name) throw new Error("Class name required");
+    if (!Number.isFinite(fee) || fee < 0) throw new Error("Invalid fee");
+    const info = classStmt.insert.run(name, fee);
     const c = classStmt.find.get(info.lastInsertRowid);
     res.status(201).json(c);
   } catch (e) {
@@ -237,11 +214,11 @@ app.post('/api/classes', (req, res) => {
   }
 });
 
-// ---- API: Enrollments ----
-app.post('/api/enrollments', (req, res) => {
+// --- API: Enrollments ---
+app.post("/api/enrollments", (req, res) => {
   try {
-    const student_id = toId(req.body.student_id, 'student_id');
-    const class_id = toId(req.body.class_id, 'class_id');
+    const student_id = toId(req.body.student_id, "student_id");
+    const class_id = toId(req.body.class_id, "class_id");
     enrollStmt.enroll.run(student_id, class_id);
     res.status(201).json({ ok: true });
   } catch (e) {
@@ -249,27 +226,27 @@ app.post('/api/enrollments', (req, res) => {
   }
 });
 
-app.get('/api/classes/:id/students', (req, res) => {
+app.get("/api/classes/:id/students", (req, res) => {
   try {
-    const class_id = toId(req.params.id, 'class_id');
+    const class_id = toId(req.params.id, "class_id");
     res.json(enrollStmt.studentsInClass.all(class_id));
   } catch (e) {
     sendError(res, 400, e.message);
   }
 });
 
-// ---- API: Payments & Unpaid ----
-app.post('/api/payments', (req, res) => {
+// --- API: Payments ---
+app.post("/api/payments", (req, res) => {
   try {
-    const student_id = toId(req.body.student_id, 'student_id');
-    const class_id = toId(req.body.class_id, 'class_id');
+    const student_id = toId(req.body.student_id, "student_id");
+    const class_id = toId(req.body.class_id, "class_id");
     const month = req.body.month || monthKey();
     const amount = Number(req.body.amount);
-    const method = req.body.method || 'cash';
+    const method = (req.body.method || "cash").trim() || "cash";
 
-    if (!isValidMonth(month)) throw new Error('Invalid month (YYYY-MM)');
+    if (!isValidMonth(month)) throw new Error("Invalid month (YYYY-MM)");
     if (!Number.isFinite(amount) || amount < 0)
-      throw new Error('Invalid amount');
+      throw new Error("Invalid amount");
 
     paymentStmt.upsert.run(student_id, class_id, month, amount, method);
     res.status(201).json({ ok: true });
@@ -278,10 +255,11 @@ app.post('/api/payments', (req, res) => {
   }
 });
 
-app.get('/api/unpaid', (req, res) => {
+// --- API: Unpaid & Finance ---
+app.get("/api/unpaid", (req, res) => {
   try {
     const month = req.query.month || monthKey();
-    if (!isValidMonth(month)) throw new Error('Invalid month (YYYY-MM)');
+    if (!isValidMonth(month)) throw new Error("Invalid month (YYYY-MM)");
     const rows = paymentStmt.unpaid.all(month);
     res.json({ month, rows });
   } catch (e) {
@@ -289,22 +267,32 @@ app.get('/api/unpaid', (req, res) => {
   }
 });
 
-app.get('/api/finance', (req, res) => {
+app.get("/api/finance", (req, res) => {
   try {
     const month = req.query.month || monthKey();
-    if (!isValidMonth(month)) throw new Error('Invalid month (YYYY-MM)');
+    if (!isValidMonth(month)) throw new Error("Invalid month (YYYY-MM)");
     const rows = paymentStmt.summaryByClass.all(month);
-    const total = rows.reduce((t, r) => t + (r.total_amount || 0), 0);
+    const total = rows.reduce(
+      (t, r) => t + (r.total_amount || 0),
+      0
+    );
     res.json({ month, rows, total });
   } catch (e) {
     sendError(res, 400, e.message);
   }
 });
 
-// -----------------------------------------------------------------------------
-// Frontend (single HTML page served by backend)
-// -----------------------------------------------------------------------------
-const FRONTEND_HTML = String.raw`<!doctype html>
+// --- API: Health ---
+app.get("/api/health", (req, res) => {
+  res.json({
+    ok: true,
+    db: DB_PATH,
+    ts: new Date().toISOString(),
+  });
+});
+
+// ---------- Frontend HTML (no ${} inside!) ----------
+const FRONTEND_HTML = `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8"/>
@@ -340,13 +328,8 @@ const FRONTEND_HTML = String.raw`<!doctype html>
     header button.active{
       background:#2563eb;
     }
-    section{
-      display:none;
-      margin-top:.5rem;
-    }
-    section.active{
-      display:block;
-    }
+    section{display:none;margin-top:.5rem;}
+    section.active{display:block;}
     .card{
       background:#020617;
       border:1px solid #1f2937;
@@ -362,9 +345,7 @@ const FRONTEND_HTML = String.raw`<!doctype html>
       color:#e5e7eb;
       width:100%;
     }
-    label{
-      font-size:.85rem;
-    }
+    label{font-size:.85rem;}
     table{
       width:100%;
       border-collapse:collapse;
@@ -385,11 +366,7 @@ const FRONTEND_HTML = String.raw`<!doctype html>
       font-size:.85rem;
       margin-top:.4rem;
     }
-    .row{
-      display:flex;
-      flex-wrap:wrap;
-      gap:.7rem;
-    }
+    .row{display:flex;flex-wrap:wrap;gap:.7rem;}
     .grow{flex:1 1 220px;}
     #status{
       margin-bottom:.6rem;
@@ -416,7 +393,6 @@ const FRONTEND_HTML = String.raw`<!doctype html>
       <button data-tab="finance">Finance</button>
     </header>
 
-    <!-- Students -->
     <section id="tab-students" class="active">
       <div class="card">
         <h2>Students</h2>
@@ -439,7 +415,6 @@ const FRONTEND_HTML = String.raw`<!doctype html>
       </div>
     </section>
 
-    <!-- Classes -->
     <section id="tab-classes">
       <div class="card">
         <h2>Classes</h2>
@@ -462,7 +437,6 @@ const FRONTEND_HTML = String.raw`<!doctype html>
       </div>
     </section>
 
-    <!-- Enrollments -->
     <section id="tab-enrollments">
       <div class="card">
         <h2>Enroll Student</h2>
@@ -490,7 +464,6 @@ const FRONTEND_HTML = String.raw`<!doctype html>
       </div>
     </section>
 
-    <!-- Payments -->
     <section id="tab-payments">
       <div class="card">
         <h2>Record Payment</h2>
@@ -512,7 +485,9 @@ const FRONTEND_HTML = String.raw`<!doctype html>
           <div class="grow">
             <label>Method<br>
               <select id="pay-method">
-                <option>cash</option><option>bank</option><option>online</option>
+                <option>cash</option>
+                <option>bank</option>
+                <option>online</option>
               </select>
             </label>
           </div>
@@ -521,7 +496,6 @@ const FRONTEND_HTML = String.raw`<!doctype html>
       </div>
     </section>
 
-    <!-- Unpaid -->
     <section id="tab-unpaid">
       <div class="card">
         <h2>Unpaid Students</h2>
@@ -540,7 +514,6 @@ const FRONTEND_HTML = String.raw`<!doctype html>
       </div>
     </section>
 
-    <!-- Finance -->
     <section id="tab-finance">
       <div class="card">
         <h2>Finance Summary</h2>
@@ -562,173 +535,200 @@ const FRONTEND_HTML = String.raw`<!doctype html>
   </div>
 
 <script>
-const $ = (id) => document.getElementById(id);
-const statusEl = $('status');
+(function(){
+  function $(id){return document.getElementById(id);}
+  var statusEl = $("status");
 
-function setStatus(msg, isError=false){
-  statusEl.textContent = msg || '';
-  statusEl.style.color = isError ? '#fca5a5' : '#93c5fd';
-}
-
-async function api(url, options={}){
-  const res = await fetch(url, {
-    headers: { 'Content-Type':'application/json' },
-    ...options
-  });
-  if(!res.ok){
-    const data = await res.json().catch(()=>({}));
-    throw new Error(data.error || ('HTTP ' + res.status));
+  function setStatus(msg,isError){
+    statusEl.textContent = msg || "";
+    statusEl.style.color = isError ? "#fca5a5" : "#93c5fd";
   }
-  return res.json().catch(()=> ({}));
-}
 
-function switchTab(tabId){
-  document.querySelectorAll('header button').forEach(btn=>{
-    btn.classList.toggle('active', btn.dataset.tab === tabId);
-  });
-  document.querySelectorAll('section').forEach(sec=>{
-    sec.classList.toggle('active', sec.id === 'tab-'+tabId);
-  });
-}
-
-document.querySelectorAll('header button').forEach(btn=>{
-  btn.addEventListener('click', ()=>switchTab(btn.dataset.tab));
-});
-
-// ----- Loaders -----
-async function loadStudents(){
-  const data = await api('/api/students');
-  const tbody = $('students-table').querySelector('tbody');
-  tbody.innerHTML = data.map(s=>`
-    <tr><td>${s.id}</td><td>${s.name}</td><td>${s.phone||''}</td></tr>
-  `).join('');
-  const opts = data.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
-  ['enroll-student','pay-student'].forEach(id=>$(id).innerHTML = opts);
-}
-
-async function loadClasses(){
-  const data = await api('/api/classes');
-  const tbody = $('classes-table').querySelector('tbody');
-  tbody.innerHTML = data.map(c=>`
-    <tr><td>${c.id}</td><td>${c.name}</td><td>${c.monthly_fee}</td></tr>
-  `).join('');
-  const opts = data.map(c=>`<option value="${c.id}">${c.name}</option>`).join('');
-  ['enroll-class','enroll-view-class','pay-class'].forEach(id=>$(id).innerHTML = opts);
-}
-
-async function loadStudentsInClass(){
-  const classId = $('enroll-view-class').value;
-  if(!classId) return;
-  const data = await api('/api/classes/'+classId+'/students');
-  const tbody = $('enroll-table').querySelector('tbody');
-  tbody.innerHTML = data.map(s=>`
-    <tr><td>${s.id}</td><td>${s.name}</td><td>${s.phone||''}</td></tr>
-  `).join('');
-}
-
-// ----- Actions -----
-$('btn-add-student').addEventListener('click', async ()=>{
-  try{
-    const name = $('stu-name').value.trim();
-    const phone = $('stu-phone').value.trim();
-    if(!name) return setStatus('Name is required', true);
-    await api('/api/students',{method:'POST',body:JSON.stringify({name,phone})});
-    $('stu-name').value=''; $('stu-phone').value='';
-    setStatus('Student added');
-    await loadStudents();
-  }catch(e){setStatus(e.message,true);}
-});
-
-$('btn-add-class').addEventListener('click', async ()=>{
-  try{
-    const name = $('class-name').value.trim();
-    const monthly_fee = Number($('class-fee').value || 0);
-    if(!name) return setStatus('Class name required',true);
-    await api('/api/classes',{method:'POST',body:JSON.stringify({name,monthly_fee})});
-    $('class-name').value=''; $('class-fee').value='2000';
-    setStatus('Class added');
-    await loadClasses();
-  }catch(e){setStatus(e.message,true);}
-});
-
-$('btn-enroll').addEventListener('click', async ()=>{
-  try{
-    const student_id = Number($('enroll-student').value);
-    const class_id = Number($('enroll-class').value);
-    if(!student_id || !class_id) return setStatus('Select student and class',true);
-    await api('/api/enrollments',{method:'POST',body:JSON.stringify({student_id,class_id})});
-    setStatus('Student enrolled');
-    await loadStudentsInClass();
-  }catch(e){setStatus(e.message,true);}
-});
-
-$('enroll-view-class').addEventListener('change', loadStudentsInClass);
-
-$('btn-pay').addEventListener('click', async ()=>{
-  try{
-    const student_id = Number($('pay-student').value);
-    const class_id = Number($('pay-class').value);
-    const month = $('pay-month').value || new Date().toISOString().slice(0,7);
-    const amount = Number($('pay-amount').value || 0);
-    const method = $('pay-method').value;
-    await api('/api/payments',{method:'POST',body:JSON.stringify({student_id,class_id,month,amount,method})});
-    setStatus('Payment saved');
-  }catch(e){setStatus(e.message,true);}
-});
-
-$('btn-load-unpaid').addEventListener('click', async ()=>{
-  try{
-    const month = $('unpaid-month').value || new Date().toISOString().slice(0,7);
-    const data = await api('/api/unpaid?month='+encodeURIComponent(month));
-    const tbody = $('unpaid-table').querySelector('tbody');
-    tbody.innerHTML = data.rows.map(r=>`
-      <tr><td>${r.class_name}</td><td>${r.student_name}</td><td>${r.phone||''}</td></tr>
-    `).join('');
-    setStatus('Loaded unpaid for '+data.month);
-  }catch(e){setStatus(e.message,true);}
-});
-
-$('btn-load-finance').addEventListener('click', async ()=>{
-  try{
-    const month = $('fin-month').value || new Date().toISOString().slice(0,7);
-    const data = await api('/api/finance?month='+encodeURIComponent(month));
-    const tbody = $('finance-table').querySelector('tbody');
-    tbody.innerHTML = data.rows.map(r=>`
-      <tr><td>${r.class_name}</td><td>${r.payments_count}</td><td>${r.total_amount}</td></tr>
-    `).join('');
-    $('finance-total').textContent = data.total;
-    setStatus('Loaded finance for '+data.month);
-  }catch(e){setStatus(e.message,true);}
-});
-
-// Initial defaults
-const todayMonth = new Date().toISOString().slice(0,7);
-['pay-month','unpaid-month','fin-month'].forEach(id=>$(id).value=todayMonth);
-
-// Initial load
-(async ()=>{
-  try{
-    await loadStudents();
-    await loadClasses();
-    $('enroll-view-class').dispatchEvent(new Event('change'));
-    setStatus('Ready');
-  }catch(e){
-    setStatus('Error loading initial data: '+e.message,true);
+  function api(url, options){
+    if(!options){options = {};}
+    if(!options.headers){options.headers = {};}
+    if(options.body && typeof options.body !== "string"){
+      options.body = JSON.stringify(options.body);
+    }
+    options.headers["Content-Type"] = "application/json";
+    return fetch(url, options).then(function(res){
+      return res.json().then(function(data){
+        if(!res.ok){throw new Error(data.error || ("HTTP " + res.status));}
+        return data;
+      }).catch(function(){
+        if(!res.ok){throw new Error("HTTP " + res.status);}
+        return {};
+      });
+    });
   }
+
+  function switchTab(tabId){
+    var buttons = document.querySelectorAll("header button");
+    for(var i=0;i<buttons.length;i++){
+      buttons[i].classList.toggle("active", buttons[i].getAttribute("data-tab") === tabId);
+    }
+    var sections = document.querySelectorAll("section");
+    for(var j=0;j<sections.length;j++){
+      sections[j].classList.toggle("active", sections[j].id === "tab-" + tabId);
+    }
+  }
+
+  var headerButtons = document.querySelectorAll("header button");
+  for(var i=0;i<headerButtons.length;i++){
+    headerButtons[i].addEventListener("click", function(){
+      switchTab(this.getAttribute("data-tab"));
+    });
+  }
+
+  function loadStudents(){
+    return api("/api/students").then(function(data){
+      var tbody = $("students-table").querySelector("tbody");
+      var html = "";
+      data.forEach(function(s){
+        html += "<tr><td>"+s.id+"</td><td>"+s.name+"</td><td>"+(s.phone||"")+"</td></tr>";
+      });
+      tbody.innerHTML = html;
+
+      var opts = "";
+      data.forEach(function(s){
+        opts += "<option value=\""+s.id+"\">"+s.name+"</option>";
+      });
+      $("enroll-student").innerHTML = opts;
+      $("pay-student").innerHTML = opts;
+    });
+  }
+
+  function loadClasses(){
+    return api("/api/classes").then(function(data){
+      var tbody = $("classes-table").querySelector("tbody");
+      var html = "";
+      data.forEach(function(c){
+        html += "<tr><td>"+c.id+"</td><td>"+c.name+"</td><td>"+c.monthly_fee+"</td></tr>";
+      });
+      tbody.innerHTML = html;
+
+      var opts = "";
+      data.forEach(function(c){
+        opts += "<option value=\""+c.id+"\">"+c.name+"</option>";
+      });
+      $("enroll-class").innerHTML = opts;
+      $("enroll-view-class").innerHTML = opts;
+      $("pay-class").innerHTML = opts;
+    });
+  }
+
+  function loadStudentsInClass(){
+    var classId = $("enroll-view-class").value;
+    if(!classId){return;}
+    api("/api/classes/"+classId+"/students").then(function(data){
+      var tbody = $("enroll-table").querySelector("tbody");
+      var html = "";
+      data.forEach(function(s){
+        html += "<tr><td>"+s.id+"</td><td>"+s.name+"</td><td>"+(s.phone||"")+"</td></tr>";
+      });
+      tbody.innerHTML = html;
+    }).catch(function(e){setStatus(e.message,true);});
+  }
+
+  $("btn-add-student").addEventListener("click", function(){
+    var name = $("stu-name").value.trim();
+    var phone = $("stu-phone").value.trim();
+    if(!name){setStatus("Name is required",true);return;}
+    api("/api/students",{method:"POST",body:{name:name,phone:phone}}).then(function(){
+      $("stu-name").value = "";
+      $("stu-phone").value = "";
+      setStatus("Student added");
+      return loadStudents();
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  $("btn-add-class").addEventListener("click", function(){
+    var name = $("class-name").value.trim();
+    var fee = Number($("class-fee").value || 0);
+    if(!name){setStatus("Class name required",true);return;}
+    api("/api/classes",{method:"POST",body:{name:name,monthly_fee:fee}}).then(function(){
+      $("class-name").value = "";
+      $("class-fee").value = "2000";
+      setStatus("Class added");
+      return loadClasses();
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  $("btn-enroll").addEventListener("click", function(){
+    var student_id = Number($("enroll-student").value);
+    var class_id = Number($("enroll-class").value);
+    if(!student_id || !class_id){setStatus("Select student and class",true);return;}
+    api("/api/enrollments",{method:"POST",body:{student_id:student_id,class_id:class_id}}).then(function(){
+      setStatus("Student enrolled");
+      loadStudentsInClass();
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  $("enroll-view-class").addEventListener("change", loadStudentsInClass);
+
+  $("btn-pay").addEventListener("click", function(){
+    var student_id = Number($("pay-student").value);
+    var class_id = Number($("pay-class").value);
+    var month = $("pay-month").value || new Date().toISOString().slice(0,7);
+    var amount = Number($("pay-amount").value || 0);
+    var method = $("pay-method").value;
+    api("/api/payments",{method:"POST",body:{student_id:student_id,class_id:class_id,month:month,amount:amount,method:method}})
+    .then(function(){
+      setStatus("Payment saved");
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  $("btn-load-unpaid").addEventListener("click", function(){
+    var month = $("unpaid-month").value || new Date().toISOString().slice(0,7);
+    api("/api/unpaid?month="+encodeURIComponent(month)).then(function(data){
+      var tbody = $("unpaid-table").querySelector("tbody");
+      var html = "";
+      data.rows.forEach(function(r){
+        html += "<tr><td>"+r.class_name+"</td><td>"+r.student_name+"</td><td>"+(r.phone||"")+"</td></tr>";
+      });
+      tbody.innerHTML = html;
+      setStatus("Loaded unpaid for "+data.month);
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  $("btn-load-finance").addEventListener("click", function(){
+    var month = $("fin-month").value || new Date().toISOString().slice(0,7);
+    api("/api/finance?month="+encodeURIComponent(month)).then(function(data){
+      var tbody = $("finance-table").querySelector("tbody");
+      var html = "";
+      data.rows.forEach(function(r){
+        html += "<tr><td>"+r.class_name+"</td><td>"+r.payments_count+"</td><td>"+r.total_amount+"</td></tr>";
+      });
+      tbody.innerHTML = html;
+      $("finance-total").textContent = data.total;
+      setStatus("Loaded finance for "+data.month);
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  var todayMonth = new Date().toISOString().slice(0,7);
+  ["pay-month","unpaid-month","fin-month"].forEach(function(id){
+    $(id).value = todayMonth;
+  });
+
+  Promise.all([loadStudents(), loadClasses()]).then(function(){
+    loadStudentsInClass();
+    setStatus("Ready");
+  }).catch(function(e){
+    setStatus("Error loading initial data: "+e.message,true);
+  });
 })();
 </script>
+
 </body>
 </html>`;
 
 // Serve frontend
-app.get('/', (req, res) => {
-  res.type('html').send(FRONTEND_HTML);
+app.get("/", (req, res) => {
+  res.type("html").send(FRONTEND_HTML);
 });
 
-// -----------------------------------------------------------------------------
-// Start server
-// -----------------------------------------------------------------------------
+// ---------- Start server ----------
 app.listen(PORT, () => {
-  console.log(`✅ Class Payment System running at http://localhost:${PORT}`);
-  console.log(`🗄  DB file: ${DB_PATH}`);
+  console.log("✅ Class Payment System running on port " + PORT);
+  console.log("🗄  DB file:", DB_PATH);
 });
