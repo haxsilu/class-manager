@@ -1,19 +1,14 @@
 // server.js
-// Single-file Class Payment System (Backend + Frontend)
+// Single-file Class Payment & Management System
+// Backend: Node.js (CommonJS), Express, SQLite (better-sqlite3)
+// Frontend: Single-page HTML+CSS+JS served from "/"
 
-// Backend: Node.js, Express, SQLite (better-sqlite3)
-// Frontend: Simple HTML+JS dashboard (no build tools)
-
-import express from "express";
-import Database from "better-sqlite3";
-import path from "path";
-import { fileURLToPath } from "url";
+const express = require("express");
+const Database = require("better-sqlite3");
+const path = require("path");
 
 // ---------- Runtime setup ----------
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, "class_payments.db");
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "class_manager.db");
 const PORT = Number(process.env.PORT || 5050);
 
 // ---------- Database ----------
@@ -65,6 +60,19 @@ function openDb() {
     CREATE INDEX IF NOT EXISTS idx_enroll_class  ON enrollments(class_id);
   `);
 
+  // Seed default classes if missing
+  const existing = db
+    .prepare("SELECT name FROM classes")
+    .all()
+    .map((r) => r.name);
+  ["Grade 6", "Grade 7", "Grade 8", "O/L"].forEach((title) => {
+    if (!existing.includes(title)) {
+      db.prepare(
+        "INSERT INTO classes(name, monthly_fee) VALUES(?, 2000)"
+      ).run(title);
+    }
+  });
+
   return db;
 }
 
@@ -72,19 +80,17 @@ const db = openDb();
 
 // ---------- Helpers ----------
 function monthKey(d = new Date()) {
-  return (
-    d.getFullYear() +
-    "-" +
-    String(d.getMonth() + 1).padStart(2, "0")
-  );
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return y + "-" + m;
 }
 
 function isValidMonth(m) {
   return typeof m === "string" && /^\d{4}-\d{2}$/.test(m);
 }
 
-function toId(value, field = "id") {
-  const n = Number(value);
+function toId(val, field = "id") {
+  const n = Number(val);
   if (!Number.isInteger(n) || n <= 0) {
     throw new Error("Invalid " + field);
   }
@@ -95,7 +101,7 @@ function sendError(res, code, msg) {
   res.status(code).json({ error: msg });
 }
 
-// ---------- Prepared statements (simple "services") ----------
+// ---------- Prepared statements ----------
 const studentStmt = {
   list: db.prepare("SELECT * FROM students ORDER BY name COLLATE NOCASE"),
   find: db.prepare("SELECT * FROM students WHERE id=?"),
@@ -106,9 +112,7 @@ const studentStmt = {
 const classStmt = {
   list: db.prepare("SELECT * FROM classes ORDER BY name COLLATE NOCASE"),
   find: db.prepare("SELECT * FROM classes WHERE id=?"),
-  insert: db.prepare(
-    "INSERT INTO classes(name,monthly_fee) VALUES(?,?)"
-  ),
+  insert: db.prepare("INSERT INTO classes(name,monthly_fee) VALUES(?,?)"),
 };
 
 const enrollStmt = {
@@ -178,8 +182,8 @@ app.post("/api/students", (req, res) => {
     const phone = (req.body.phone || "").trim() || null;
     if (!name) throw new Error("Name is required");
     const info = studentStmt.insert.run(name, phone);
-    const s = studentStmt.find.get(info.lastInsertRowid);
-    res.status(201).json(s);
+    const student = studentStmt.find.get(info.lastInsertRowid);
+    res.status(201).json(student);
   } catch (e) {
     sendError(res, 400, e.message);
   }
@@ -273,7 +277,7 @@ app.get("/api/finance", (req, res) => {
     if (!isValidMonth(month)) throw new Error("Invalid month (YYYY-MM)");
     const rows = paymentStmt.summaryByClass.all(month);
     const total = rows.reduce(
-      (t, r) => t + (r.total_amount || 0),
+      (sum, r) => sum + (r.total_amount || 0),
       0
     );
     res.json({ month, rows, total });
@@ -291,7 +295,7 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// ---------- Frontend HTML (no ${} inside!) ----------
+// ---------- Frontend HTML (NO ${} inside this string) ----------
 const FRONTEND_HTML = `<!doctype html>
 <html>
 <head>
@@ -373,6 +377,12 @@ const FRONTEND_HTML = `<!doctype html>
       font-size:.85rem;
       color:#93c5fd;
     }
+    footer{
+      margin-top:1.5rem;
+      font-size:.8rem;
+      color:#64748b;
+      text-align:center;
+    }
     @media(max-width:768px){
       table{display:block;overflow-x:auto;white-space:nowrap;}
       header{flex-direction:column;}
@@ -393,6 +403,7 @@ const FRONTEND_HTML = `<!doctype html>
       <button data-tab="finance">Finance</button>
     </header>
 
+    <!-- Students -->
     <section id="tab-students" class="active">
       <div class="card">
         <h2>Students</h2>
@@ -415,12 +426,13 @@ const FRONTEND_HTML = `<!doctype html>
       </div>
     </section>
 
+    <!-- Classes -->
     <section id="tab-classes">
       <div class="card">
         <h2>Classes</h2>
         <div class="row">
           <div class="grow">
-            <label>Name<br><input id="class-name"></label>
+            <label>Name<br><input id="class-name" placeholder="Grade 6 / Grade 7 ..."></label>
           </div>
           <div class="grow">
             <label>Monthly fee<br><input id="class-fee" type="number" value="2000"></label>
@@ -437,6 +449,7 @@ const FRONTEND_HTML = `<!doctype html>
       </div>
     </section>
 
+    <!-- Enrollments -->
     <section id="tab-enrollments">
       <div class="card">
         <h2>Enroll Student</h2>
@@ -464,6 +477,7 @@ const FRONTEND_HTML = `<!doctype html>
       </div>
     </section>
 
+    <!-- Payments -->
     <section id="tab-payments">
       <div class="card">
         <h2>Record Payment</h2>
@@ -496,6 +510,7 @@ const FRONTEND_HTML = `<!doctype html>
       </div>
     </section>
 
+    <!-- Unpaid -->
     <section id="tab-unpaid">
       <div class="card">
         <h2>Unpaid Students</h2>
@@ -514,6 +529,7 @@ const FRONTEND_HTML = `<!doctype html>
       </div>
     </section>
 
+    <!-- Finance -->
     <section id="tab-finance">
       <div class="card">
         <h2>Finance Summary</h2>
@@ -532,6 +548,8 @@ const FRONTEND_HTML = `<!doctype html>
         </table>
       </div>
     </section>
+
+    <footer>Created by Pulindu Pansilu</footer>
   </div>
 
 <script>
@@ -542,18 +560,21 @@ const FRONTEND_HTML = `<!doctype html>
   function setStatus(msg,isError){
     statusEl.textContent = msg || "";
     statusEl.style.color = isError ? "#fca5a5" : "#93c5fd";
+    if(isError && msg){console.error(msg);}
   }
 
   function api(url, options){
-    if(!options){options = {};}
-    if(!options.headers){options.headers = {};}
+    options = options || {};
+    options.headers = options.headers || {};
     if(options.body && typeof options.body !== "string"){
       options.body = JSON.stringify(options.body);
     }
     options.headers["Content-Type"] = "application/json";
     return fetch(url, options).then(function(res){
       return res.json().then(function(data){
-        if(!res.ok){throw new Error(data.error || ("HTTP " + res.status));}
+        if(!res.ok){
+          throw new Error(data.error || ("HTTP " + res.status));
+        }
         return data;
       }).catch(function(){
         if(!res.ok){throw new Error("HTTP " + res.status);}
@@ -565,17 +586,19 @@ const FRONTEND_HTML = `<!doctype html>
   function switchTab(tabId){
     var buttons = document.querySelectorAll("header button");
     for(var i=0;i<buttons.length;i++){
-      buttons[i].classList.toggle("active", buttons[i].getAttribute("data-tab") === tabId);
+      var b=buttons[i];
+      b.classList.toggle("active", b.getAttribute("data-tab") === tabId);
     }
     var sections = document.querySelectorAll("section");
     for(var j=0;j<sections.length;j++){
-      sections[j].classList.toggle("active", sections[j].id === "tab-" + tabId);
+      var s=sections[j];
+      s.classList.toggle("active", s.id === "tab-" + tabId);
     }
   }
 
-  var headerButtons = document.querySelectorAll("header button");
-  for(var i=0;i<headerButtons.length;i++){
-    headerButtons[i].addEventListener("click", function(){
+  var navButtons = document.querySelectorAll("header button");
+  for(var i=0;i<navButtons.length;i++){
+    navButtons[i].addEventListener("click", function(){
       switchTab(this.getAttribute("data-tab"));
     });
   }
@@ -591,7 +614,7 @@ const FRONTEND_HTML = `<!doctype html>
 
       var opts = "";
       data.forEach(function(s){
-        opts += "<option value=\""+s.id+"\">"+s.name+"</option>";
+        opts += "<option value='"+s.id+"'>"+s.name+"</option>";
       });
       $("enroll-student").innerHTML = opts;
       $("pay-student").innerHTML = opts;
@@ -609,7 +632,7 @@ const FRONTEND_HTML = `<!doctype html>
 
       var opts = "";
       data.forEach(function(c){
-        opts += "<option value=\""+c.id+"\">"+c.name+"</option>";
+        opts += "<option value='"+c.id+"'>"+c.name+"</option>";
       });
       $("enroll-class").innerHTML = opts;
       $("enroll-view-class").innerHTML = opts;
@@ -669,17 +692,16 @@ const FRONTEND_HTML = `<!doctype html>
   $("btn-pay").addEventListener("click", function(){
     var student_id = Number($("pay-student").value);
     var class_id = Number($("pay-class").value);
-    var month = $("pay-month").value || new Date().toISOString().slice(0,7);
+    var month = $("pay-month").value || (new Date().toISOString().slice(0,7));
     var amount = Number($("pay-amount").value || 0);
     var method = $("pay-method").value;
-    api("/api/payments",{method:"POST",body:{student_id:student_id,class_id:class_id,month:month,amount:amount,method:method}})
-    .then(function(){
+    api("/api/payments",{method:"POST",body:{student_id:student_id,class_id:class_id,month:month,amount:amount,method:method}}).then(function(){
       setStatus("Payment saved");
     }).catch(function(e){setStatus(e.message,true);});
   });
 
   $("btn-load-unpaid").addEventListener("click", function(){
-    var month = $("unpaid-month").value || new Date().toISOString().slice(0,7);
+    var month = $("unpaid-month").value || (new Date().toISOString().slice(0,7));
     api("/api/unpaid?month="+encodeURIComponent(month)).then(function(data){
       var tbody = $("unpaid-table").querySelector("tbody");
       var html = "";
@@ -692,7 +714,7 @@ const FRONTEND_HTML = `<!doctype html>
   });
 
   $("btn-load-finance").addEventListener("click", function(){
-    var month = $("fin-month").value || new Date().toISOString().slice(0,7);
+    var month = $("fin-month").value || (new Date().toISOString().slice(0,7));
     api("/api/finance?month="+encodeURIComponent(month)).then(function(data){
       var tbody = $("finance-table").querySelector("tbody");
       var html = "";
@@ -707,11 +729,13 @@ const FRONTEND_HTML = `<!doctype html>
 
   var todayMonth = new Date().toISOString().slice(0,7);
   ["pay-month","unpaid-month","fin-month"].forEach(function(id){
-    $(id).value = todayMonth;
+    if($(id)) $(id).value = todayMonth;
   });
 
   Promise.all([loadStudents(), loadClasses()]).then(function(){
-    loadStudentsInClass();
+    if($("enroll-view-class").value){
+      loadStudentsInClass();
+    }
     setStatus("Ready");
   }).catch(function(e){
     setStatus("Error loading initial data: "+e.message,true);
@@ -729,6 +753,6 @@ app.get("/", (req, res) => {
 
 // ---------- Start server ----------
 app.listen(PORT, () => {
-  console.log("✅ Class Payment System running on port " + PORT);
+  console.log("✅ Class Manager running on port " + PORT);
   console.log("🗄  DB file:", DB_PATH);
 });
