@@ -1,5 +1,7 @@
 // server.js
 // Class Management / Payment / Attendance System in a single file
+// NOTE: Data is stored in "class_manager.db". Replacing this file (server.js)
+// will NOT erase data as long as the DB file is preserved (e.g. Railway volume).
 
 const express = require("express");
 const path = require("path");
@@ -15,7 +17,7 @@ const DB_FILE = path.join(__dirname, "class_manager.db");
 if (!fs.existsSync(DB_FILE)) {
   fs.closeSync(fs.openSync(DB_FILE, "w"));
 }
-const db = new Database(DB_FILE);
+let db = new Database(DB_FILE);
 db.pragma("foreign_keys = ON");
 
 // Create tables
@@ -60,7 +62,7 @@ CREATE TABLE IF NOT EXISTS payments (
 );
 `);
 
-// Seed classes
+// Seed classes once
 const seedClassesStmt = db.prepare("SELECT COUNT(*) AS cnt FROM classes");
 const classesCount = seedClassesStmt.get().cnt;
 if (classesCount === 0) {
@@ -511,7 +513,7 @@ const FRONTEND_HTML = `<!doctype html>
     #qr-reader__scan_region {
       background: #020617;
     }
-    #qr-reader__dashboard {
+    #qr-reader__camera_selection {
       background: #020617;
     }
 
@@ -534,7 +536,8 @@ const FRONTEND_HTML = `<!doctype html>
       }
     }
   </style>
-  <script src="https://unpkg.com/html5-qrcode@2.3.10/html5-qrcode.min.js"></script>
+  <!-- QR library -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.10/minified/html5-qrcode.min.js"></script>
 </head>
 <body>
 <header>
@@ -628,7 +631,7 @@ const FRONTEND_HTML = `<!doctype html>
             Revenue this month: <strong id="stat-month-revenue">0</strong> LKR
           </div>
           <div class="muted" style="margin-top:0.5rem;">
-            Stats automatically refresh as you add students and record attendance or payments.
+            Stats automatically refresh as you add students and record payments.
           </div>
         </div>
       </div>
@@ -684,7 +687,22 @@ const FRONTEND_HTML = `<!doctype html>
         <div class="muted" style="margin-bottom:0.6rem;">
           When you open this tab, the camera will request permission and start scanning automatically.
         </div>
-        <button type="button" class="btn btn-outline btn-small" id="scanner-payment-btn" disabled>
+
+        <form id="scanner-manual-form" style="margin-top:0.75rem;">
+          <div class="card-subtitle" style="margin-bottom:0.35rem;">Manual attendance (backup)</div>
+          <div class="input-row">
+            <div class="field">
+              <label for="scanner-manual-phone">Phone (auto-detect class)</label>
+              <input type="tel" id="scanner-manual-phone" placeholder="Student phone" required />
+            </div>
+          </div>
+          <div class="flex-between">
+            <div class="muted" id="scanner-manual-status"></div>
+            <button type="submit" class="btn btn-outline btn-small">Mark present (today)</button>
+          </div>
+        </form>
+
+        <button type="button" class="btn btn-outline btn-small" id="scanner-payment-btn" disabled style="margin-top:0.6rem;">
           Record payment for last scan
         </button>
       </div>
@@ -804,7 +822,7 @@ const FRONTEND_HTML = `<!doctype html>
       <div class="card-header">
         <div>
           <div class="card-title">Unpaid students</div>
-          <div class="card-subtitle">Non free-card students without payment.</div>
+          <div class="card-subtitle">Filter by month and class.</div>
         </div>
       </div>
       <form id="unpaid-form">
@@ -812,6 +830,16 @@ const FRONTEND_HTML = `<!doctype html>
           <div class="field">
             <label for="unpaid-month">Month</label>
             <input type="month" id="unpaid-month" required />
+          </div>
+          <div class="field">
+            <label for="unpaid-class">Class (optional)</label>
+            <select id="unpaid-class">
+              <option value="">All classes</option>
+              <option value="Grade 6">Grade 6</option>
+              <option value="Grade 7">Grade 7</option>
+              <option value="Grade 8">Grade 8</option>
+              <option value="O/L">O/L</option>
+            </select>
           </div>
           <div class="field" style="flex:0 0 auto;margin-top:1.2rem;">
             <button type="submit" class="btn btn-small">Load unpaid list</button>
@@ -824,7 +852,7 @@ const FRONTEND_HTML = `<!doctype html>
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title">List</div>
+          <div class="card-title">Unpaid list</div>
           <div class="card-subtitle">Tap "Record payment" to settle.</div>
         </div>
       </div>
@@ -835,6 +863,7 @@ const FRONTEND_HTML = `<!doctype html>
               <th>Class</th>
               <th>Name</th>
               <th>Phone</th>
+              <th>Expected fee</th>
               <th>Action</th>
             </tr>
           </thead>
@@ -900,22 +929,30 @@ const FRONTEND_HTML = `<!doctype html>
           </div>
         </div>
         <p class="muted">
-          Use this to download the raw SQLite database file. You can open it in any SQLite browser, back it up, or migrate data later.
+          Use this to download the raw SQLite database file. Replacing <code>server.js</code> does not erase it.
+          On Railway, attach a persistent volume for <code>class_manager.db</code> to keep data across deploys.
         </p>
-        <a href="/admin/db/download" class="btn btn-small" download>Download database</a>
+        <div class="flex-row" style="margin-bottom:0.5rem;">
+          <a href="/admin/db/download" class="btn btn-small" download>Download database</a>
+          <button type="button" id="db-info-btn" class="btn btn-outline btn-small">Show DB info</button>
+        </div>
+        <div class="muted" id="db-info-text"></div>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div>
-            <div class="card-title">About</div>
-            <div class="card-subtitle">Deployment notes.</div>
+            <div class="card-title">Exports</div>
+            <div class="card-subtitle">CSV snapshots.</div>
           </div>
         </div>
         <p class="muted">
-          This instance runs a single-file Node.js + Express + SQLite app. All UI, APIs, and schema live in <code>server.js</code>.
-          Payments and attendance are idempotent per student, class, and period.
+          Download CSV exports of students and payments for reporting or external analysis.
         </p>
+        <div class="flex-row">
+          <a href="/admin/export/students.csv" class="btn btn-small">Students CSV</a>
+          <a href="/admin/export/payments.csv" class="btn btn-small">Payments CSV</a>
+        </div>
       </div>
     </div>
   </section>
@@ -1194,11 +1231,14 @@ const FRONTEND_HTML = `<!doctype html>
   }
 
   // ---------- SCANNER ----------
-  let scannerRendered = false;
-  let html5QrcodeScannerInstance = null;
+  let html5QrCodeInstance = null;
+  let scannerStarted = false;
   const scanNotice = document.getElementById("scan-notice");
   const scannerLastDetails = document.getElementById("scanner-last-details");
   const scannerPaymentBtn = document.getElementById("scanner-payment-btn");
+  const scannerManualForm = document.getElementById("scanner-manual-form");
+  const scannerManualPhone = document.getElementById("scanner-manual-phone");
+  const scannerManualStatus = document.getElementById("scanner-manual-status");
 
   function setScanNotice(type, message, tagText) {
     if (!scanNotice) return;
@@ -1231,7 +1271,7 @@ const FRONTEND_HTML = `<!doctype html>
     }
   }
 
-  const onScanSuccess = async (decodedText /*, decodedResult*/) => {
+  const onScanSuccess = async (decodedText) => {
     let token = (decodedText || "").trim();
     try {
       const idx = token.lastIndexOf("/scan/");
@@ -1276,38 +1316,35 @@ const FRONTEND_HTML = `<!doctype html>
   };
 
   const onScanFailure = (error) => {
-    // called frequently; keep silent to avoid spamming
+    // decode errors are frequent; ignore
   };
 
   function initScanner() {
-    if (scannerRendered) return;
     const qrReaderElem = document.getElementById("qr-reader");
     if (!qrReaderElem) return;
 
-    if (typeof Html5QrcodeScanner === "undefined") {
+    if (typeof Html5Qrcode === "undefined") {
       setScanNotice("err", "QR library not loaded. Check your connection.", "ERROR");
       return;
     }
 
-    try {
-      const config = { fps: 10, qrbox: 220 };
-      html5QrcodeScannerInstance = new Html5QrcodeScanner("qr-reader", config, false);
-      html5QrcodeScannerInstance.render(onScanSuccess, onScanFailure);
-      scannerRendered = true;
-
-      // Try to auto-click the "Start Scanning" button so camera opens immediately
-      setTimeout(() => {
-        const startBtn = document.querySelector("#qr-reader button");
-        if (startBtn) {
-          startBtn.click();
-        }
-      }, 600);
-
-      setScanNotice("ok", "Scanner ready. Point a QR code to the camera.", "READY");
-    } catch (err) {
-      console.error("Scanner init failed", err);
-      setScanNotice("err", "Unable to start camera. Check permissions.", "ERROR");
+    if (!html5QrCodeInstance) {
+      html5QrCodeInstance = new Html5Qrcode("qr-reader");
     }
+
+    if (scannerStarted) return;
+
+    const config = { fps: 10, qrbox: { width: 220, height: 220 } };
+    html5QrCodeInstance
+      .start({ facingMode: "environment" }, config, onScanSuccess, onScanFailure)
+      .then(() => {
+        scannerStarted = true;
+        setScanNotice("ok", "Scanner ready. Point a QR code to the camera.", "READY");
+      })
+      .catch(err => {
+        console.error("Scanner start failed", err);
+        setScanNotice("err", "Unable to start camera. Check permissions.", "ERROR");
+      });
   }
 
   scannerPaymentBtn.addEventListener("click", () => {
@@ -1318,6 +1355,22 @@ const FRONTEND_HTML = `<!doctype html>
       name: lastScanInfo.name,
       month: lastScanInfo.month
     });
+  });
+
+  scannerManualForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const phone = scannerManualPhone.value.trim();
+    if (!phone) {
+      scannerManualStatus.textContent = "Phone is required.";
+      return;
+    }
+    try {
+      await apiPost("/api/attendance/manual-today-by-phone", { phone });
+      scannerManualStatus.textContent = "Attendance marked for today.";
+      scannerManualPhone.value = "";
+    } catch (err) {
+      scannerManualStatus.textContent = err.message || "Failed to mark attendance.";
+    }
   });
 
   // ---------- ATTENDANCE ----------
@@ -1386,6 +1439,7 @@ const FRONTEND_HTML = `<!doctype html>
   // ---------- UNPAID ----------
   const unpaidForm = document.getElementById("unpaid-form");
   const unpaidMonthInput = document.getElementById("unpaid-month");
+  const unpaidClassInput = document.getElementById("unpaid-class");
   const unpaidInfo = document.getElementById("unpaid-info");
   const unpaidTableBody = document.getElementById("unpaid-table-body");
 
@@ -1394,9 +1448,12 @@ const FRONTEND_HTML = `<!doctype html>
   unpaidForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const month = unpaidMonthInput.value;
+    const grade = unpaidClassInput.value;
     if (!month) return;
     try {
-      const data = await apiGet("/api/unpaid?month=" + encodeURIComponent(month));
+      let url = "/api/unpaid?month=" + encodeURIComponent(month);
+      if (grade) url += "&grade=" + encodeURIComponent(grade);
+      const data = await apiGet(url);
       const items = (data && data.unpaid) || [];
       unpaidTableBody.innerHTML = "";
       items.forEach(item => {
@@ -1418,11 +1475,16 @@ const FRONTEND_HTML = `<!doctype html>
         tr.innerHTML =
           "<td>" + item.class_title + "</td>" +
           "<td>" + item.name + "</td>" +
-          "<td>" + (item.phone || "-") + "</td>";
+          "<td>" + (item.phone || "-") + "</td>" +
+          "<td>2000</td>";
         tr.appendChild(actionTd);
         unpaidTableBody.appendChild(tr);
       });
-      unpaidInfo.textContent = items.length + " unpaid student(s) for " + month + ".";
+      const totalUnpaid = items.length;
+      const expected = totalUnpaid * 2000;
+      unpaidInfo.textContent = totalUnpaid + " unpaid student(s) for " + month +
+        (grade ? " in " + grade : " in all classes") +
+        ". Expected income from these: " + expected + " LKR.";
     } catch (err) {
       unpaidInfo.textContent = err.message || "Failed to load unpaid list.";
     }
@@ -1517,6 +1579,22 @@ const FRONTEND_HTML = `<!doctype html>
     }
   });
 
+  // ---------- SETTINGS: DB INFO ----------
+  const dbInfoBtn = document.getElementById("db-info-btn");
+  const dbInfoText = document.getElementById("db-info-text");
+  dbInfoBtn.addEventListener("click", async () => {
+    try {
+      const info = await apiGet("/admin/db/info");
+      dbInfoText.textContent =
+        "Size: " + info.size_kb + " KB · Path: " + info.path +
+        " · Students: " + info.students +
+        " · Payments: " + info.payments +
+        " · Attendance records: " + info.attendance;
+    } catch (err) {
+      dbInfoText.textContent = err.message || "Failed to load DB info.";
+    }
+  });
+
   // ---------- INITIAL LOAD ----------
   (async function init() {
     await refreshClasses();
@@ -1536,7 +1614,7 @@ app.get("/", (req, res) => {
   res.type("html").send(FRONTEND_HTML);
 });
 
-// Health check (optional)
+// Health check
 app.get("/healthz", (req, res) => {
   res.json({ ok: true });
 });
@@ -1544,6 +1622,90 @@ app.get("/healthz", (req, res) => {
 // Download DB
 app.get("/admin/db/download", (req, res) => {
   res.download(DB_FILE, "class_manager.db");
+});
+
+// DB info
+app.get("/admin/db/info", (req, res) => {
+  try {
+    const stats = fs.statSync(DB_FILE);
+    const size_kb = Math.round(stats.size / 1024);
+    const students = db.prepare("SELECT COUNT(*) AS c FROM students").get().c;
+    const payments = db.prepare("SELECT COUNT(*) AS c FROM payments").get().c;
+    const attendance = db.prepare("SELECT COUNT(*) AS c FROM attendance").get().c;
+    res.json({
+      path: DB_FILE,
+      size_kb,
+      students,
+      payments,
+      attendance
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to get DB info" });
+  }
+});
+
+// Export students CSV
+app.get("/admin/export/students.csv", (req, res) => {
+  try {
+    const rows = db.prepare("SELECT id, name, phone, grade, is_free, qr_token FROM students ORDER BY id").all();
+    let csv = "id,name,phone,grade,is_free,qr_token\n";
+    for (const r of rows) {
+      const line = [
+        r.id,
+        JSON.stringify(r.name || ""),
+        JSON.stringify(r.phone || ""),
+        JSON.stringify(r.grade || ""),
+        r.is_free ? 1 : 0,
+        JSON.stringify(r.qr_token || "")
+      ].join(",");
+      csv += line + "\n";
+    }
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", 'attachment; filename="students.csv"');
+    res.send(csv);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Failed to export students");
+  }
+});
+
+// Export payments CSV
+app.get("/admin/export/payments.csv", (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT p.id, p.student_id, s.name AS student_name, s.phone,
+             s.grade, p.class_id, c.title AS class_title,
+             p.month, p.amount, p.method, p.created_at
+      FROM payments p
+      JOIN students s ON s.id = p.student_id
+      JOIN classes c ON c.id = p.class_id
+      ORDER BY p.month DESC, c.id, s.name
+    `).all();
+    let csv = "id,student_id,student_name,phone,grade,class_id,class_title,month,amount,method,created_at\n";
+    for (const r of rows) {
+      const line = [
+        r.id,
+        r.student_id,
+        JSON.stringify(r.student_name || ""),
+        JSON.stringify(r.phone || ""),
+        JSON.stringify(r.grade || ""),
+        r.class_id,
+        JSON.stringify(r.class_title || ""),
+        JSON.stringify(r.month || ""),
+        r.amount,
+        JSON.stringify(r.method || ""),
+        JSON.stringify(r.created_at || "")
+      ].join(",");
+      csv += line + "\n";
+    }
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", 'attachment; filename="payments.csv"');
+    res.send(csv);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Failed to export payments");
+  }
 });
 
 // API: Classes
@@ -1747,7 +1909,7 @@ app.get("/api/attendance/list", (req, res) => {
   }
 });
 
-// Manual attendance
+// Manual attendance (full)
 app.post("/api/attendance/manual", (req, res) => {
   try {
     const { phone, grade, date } = req.body || {};
@@ -1776,6 +1938,32 @@ app.post("/api/attendance/manual", (req, res) => {
   }
 });
 
+// Manual attendance by phone for today (scanner tab)
+app.post("/api/attendance/manual-today-by-phone", (req, res) => {
+  try {
+    const { phone } = req.body || {};
+    if (!phone) return res.status(400).json({ error: "phone required" });
+    const student = db
+      .prepare("SELECT id, grade FROM students WHERE phone = ?")
+      .get(phone.trim());
+    if (!student) {
+      return res.status(404).json({ error: "Student not found for this phone" });
+    }
+    const cls = getClassByGrade(student.grade);
+    if (!cls) return res.status(500).json({ error: "Class not found" });
+    const date = getTodayDate();
+    db.prepare(`
+      INSERT INTO attendance (student_id, class_id, date, present)
+      VALUES (?, ?, ?, 1)
+      ON CONFLICT(student_id, class_id, date) DO UPDATE SET present = 1
+    `).run(student.id, cls.id, date);
+    res.json({ success: true, date, class_id: cls.id, student_id: student.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to mark attendance" });
+  }
+});
+
 // Payments
 app.post("/api/payments/record", (req, res) => {
   try {
@@ -1798,12 +1986,14 @@ app.post("/api/payments/record", (req, res) => {
   }
 });
 
-// Unpaid list
+// Unpaid list (with optional grade filter)
 app.get("/api/unpaid", (req, res) => {
   try {
     const month = req.query.month;
+    const grade = req.query.grade;
     if (!month) return res.status(400).json({ error: "month required" });
-    const stmt = db.prepare(`
+
+    let sql = `
       SELECT s.id AS student_id,
              s.name,
              s.phone,
@@ -1819,9 +2009,15 @@ app.get("/api/unpaid", (req, res) => {
             AND p.class_id = c.id
             AND p.month = ?
         )
-      ORDER BY c.id, s.name
-    `);
-    const unpaid = stmt.all(month);
+    `;
+    const params = [month];
+    if (grade) {
+      sql += " AND s.grade = ?";
+      params.push(grade);
+    }
+    sql += " ORDER BY c.id, s.name";
+    const stmt = db.prepare(sql);
+    const unpaid = stmt.all(...params);
     res.json({ unpaid });
   } catch (err) {
     console.error(err);
