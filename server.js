@@ -1,5 +1,5 @@
 // server.js
-// Class Management / Payment / Attendance System (single file)
+// Class Management / Payment / Attendance System (single file, Railway-ready)
 
 const express = require("express");
 const path = require("path");
@@ -327,14 +327,14 @@ footer{
     <div class="cards">
       <div class="card">
         <div class="card-header">
-          <div><div class="card-title">QR scanner</div><div class="card-subtitle">Camera + QR (no external lib).</div></div>
+          <div><div class="card-title">QR scanner</div><div class="card-subtitle">Camera + QR (built-in, no external lib).</div></div>
           <span class="badge"><span class="badge-dot"></span>Camera</span>
         </div>
         <div id="scan-notice" class="notice">
           <div><strong>Scanner idle.</strong> Open camera to begin.</div><div class="tag">READY</div>
         </div>
         <div id="qr-reader"></div>
-        <div class="muted">Browser must support camera + QR detection (BarcodeDetector).</div>
+        <div class="muted">Browser must support camera + QR detection (BarcodeDetector). Use Chrome-based browsers if possible.</div>
 
         <form id="scanner-manual-form" style="margin-top:.75rem;">
           <div class="card-subtitle" style="margin-bottom:.35rem;">Manual attendance (phone → today)</div>
@@ -360,7 +360,7 @@ footer{
     </div>
   </section>
 
-  <!-- ATTENDANCE (VIEW ONLY, NO MANUAL MARK HERE) -->
+  <!-- ATTENDANCE (VIEW ONLY) -->
   <section id="tab-attendance" class="tab-section">
     <div class="card">
       <div class="card-header">
@@ -1095,7 +1095,7 @@ app.delete("/api/students/:id", (req, res) => {
   }
 });
 
-// QR page: only name + grade + QR
+// QR page: modern blue-glow card, only name + grade + "Science Zone by TS"
 app.get("/students/:id/qr", (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -1107,21 +1107,100 @@ app.get("/students/:id/qr", (req, res) => {
     const qrContent = `${req.protocol}://${req.get("host")}/scan/${token}`;
     QRCode.toDataURL(qrContent, { margin: 2, scale: 8 }, (err, url) => {
       if (err) { console.error(err); return res.status(500).send("QR error"); }
-      const html = `<!doctype html><html><head><meta charset="utf-8" />
+      const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
 <title>QR | ${s.name}</title>
 <style>
-body{font-family:system-ui,sans-serif;text-align:center;padding:20px;background:#020617;color:#e5e7eb;}
-.card{display:inline-block;padding:20px;border-radius:16px;background:#0f172a;border:1px solid #1f2937;}
-button{padding:8px 14px;border-radius:999px;border:1px solid #3b82f6;background:#1d4ed8;color:#e5e7eb;cursor:pointer;margin-top:12px;}
-img{background:#fff;padding:10px;border-radius:12px;}
-</style></head><body>
-<div class="card">
-  <h2>${s.name}</h2>
-  <p>${s.grade}</p>
-  <img src="${url}" alt="QR" />
-  <div><button onclick="window.print()">Print</button></div>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{
+  min-height:100vh;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+  background:radial-gradient(circle at top,#020617 0,#020617 38%,#020617 100%);
+  color:#e2e8f0;
+}
+.card-wrap{
+  padding:2px;
+  border-radius:24px;
+  background:linear-gradient(135deg,rgba(59,130,246,1),rgba(37,99,235,.3));
+  box-shadow:0 0 40px rgba(37,99,235,.45);
+}
+.card{
+  width:320px;
+  border-radius:22px;
+  background:#020617;
+  padding:22px 20px 18px;
+  text-align:center;
+}
+.name{
+  font-size:1.3rem;
+  font-weight:600;
+  color:#f9fafb;
+}
+.grade{
+  margin-top:4px;
+  margin-bottom:18px;
+  font-size:.9rem;
+  color:#9ca3af;
+}
+.qr-box{
+  background:#020617;
+  padding:14px;
+  border-radius:18px;
+  border:1px solid rgba(148,163,184,.35);
+  box-shadow:0 0 0 1px rgba(15,23,42,1),0 0 30px rgba(30,64,175,.55);
+  margin-bottom:18px;
+}
+.qr-box img{
+  display:block;
+  width:230px;
+  height:230px;
+  background:#ffffff;
+  border-radius:12px;
+}
+.brand{
+  font-size:.8rem;
+  color:#38bdf8;
+  font-weight:600;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
+button{
+  margin-top:14px;
+  padding:7px 16px;
+  border-radius:999px;
+  border:1px solid rgba(59,130,246,.9);
+  background:#1d4ed8;
+  color:#e5e7eb;
+  font-size:.8rem;
+  cursor:pointer;
+}
+button:hover{
+  background:#2563eb;
+}
+@media print{
+  body{background:#ffffff;}
+  .card-wrap{box-shadow:none;background:none;}
+  .card{border:1px solid #e5e7eb;}
+}
+</style>
+</head>
+<body>
+<div class="card-wrap">
+  <div class="card">
+    <div class="name">${s.name}</div>
+    <div class="grade">${s.grade}</div>
+    <div class="qr-box"><img src="${url}" alt="QR code" /></div>
+    <div class="brand">Science Zone by TS</div>
+    <button onclick="window.print()">Print</button>
+  </div>
 </div>
-</body></html>`;
+</body>
+</html>`;
       res.type("html").send(html);
     });
   } catch (e) {
