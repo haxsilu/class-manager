@@ -1,13 +1,17 @@
 {
   "name": "class-manager",
   "version": "1.0.0",
+  "description": "Class management / payment / attendance system",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.0",
     "better-sqlite3": "^9.0.0",
+    "express": "^4.19.0",
     "qrcode": "^1.5.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
