@@ -9,7 +9,6 @@ const QRCode = require("qrcode");
 const Database = require("better-sqlite3");
 
 const PORT = process.env.PORT || 5050;
-// Persist DB on Railway volume mounted at /app/data
 const DB_FILE = path.join("/app/data", "class_manager.db");
 
 // ---------- DB SETUP ----------
@@ -153,7 +152,7 @@ tbody tr:hover{background:rgba(30,64,175,.24);}
 .modal-backdrop.active{display:flex;}
 .modal{max-width:420px;width:100%;border-radius:1rem;background:#020617;border:1px solid var(--b);box-shadow:0 18px 42px rgba(0,0,0,.9);padding:1rem;}
 .modal h3{margin:0 0 .6rem;font-size:.95rem;}
-#qr-reader{width:100%;max-width:360px;border-radius:1rem;overflow:hidden;border:1px solid var(--b);margin-bottom:.7rem;background:#020617;}
+#qr-reader{width:100%;max-width:360px;border-radius:1rem;overflow:hidden;border:1px solid var(--b);margin-bottom:.7rem;background:#020617;min-height:220px;display:flex;align-items:center;justify-content:center;}
 footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem 1rem;border-top:1px solid rgba(15,23,42,.96);background:radial-gradient(circle at top left,rgba(15,23,42,.95),rgba(2,6,23,.99));}
 @media(max-width:640px){.header-inner{flex-direction:column;align-items:stretch;}nav{justify-content:flex-start;}}
 </style>
@@ -232,8 +231,8 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
     <div class="card">
       <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Phone camera + QR.</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
       <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Open camera to begin.</div><div class="tag">READY</div></div>
-      <div id="qr-reader"></div>
-      <div class="muted">If camera doesn't start, check browser camera permission and internet access.</div>
+      <div id="qr-reader"><span class="muted">Camera view will appear here.</span></div>
+      <div class="muted">If camera doesn't start, check browser camera permission and internet connection.</div>
 
       <form id="scanner-manual-form" style="margin-top:.75rem;">
         <div class="card-subtitle" style="margin-bottom:.35rem;">Manual attendance (phone → today)</div>
@@ -368,6 +367,9 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
   </div>
 </div>
 
+<!-- QR library from reliable CDN (loaded synchronously before app script) -->
+<script src="https://unpkg.com/html5-qrcode@2.3.10/minified/html5-qrcode.min.js"></script>
+
 <script>
 // ---- generic helpers ----
 const jget=u=>fetch(u).then(r=>{if(!r.ok)throw new Error("Request failed");return r.json();});
@@ -376,21 +378,6 @@ const jput=(u,b)=>fetch(u,{method:"PUT",headers:{"Content-Type":"application/jso
 const jdel=u=>fetch(u,{method:"DELETE"}).then(async r=>{const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||"Request failed");return d;});
 const curMonth=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");};
 const today=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");};
-
-// ---- dynamic QR library loader (fix for phones) ----
-let qrLibPromise=null;
-function loadQrLib(){
-  if(typeof Html5Qrcode!=="undefined") return Promise.resolve();
-  if(qrLibPromise) return qrLibPromise;
-  qrLibPromise=new Promise((resolve,reject)=>{
-    const s=document.createElement("script");
-    s.src="https://unpkg.com/html5-qrcode@2.3.10";
-    s.onload=()=>resolve();
-    s.onerror=()=>reject(new Error("QR library failed to load"));
-    document.head.appendChild(s);
-  });
-  return qrLibPromise;
-}
 
 // ---- nav ----
 let activeTab="students";
@@ -448,7 +435,7 @@ async function loadStudents(){
 }
 async function refreshStats(){try{const d=await jget("/api/finance?month="+encodeURIComponent(curMonth()));statRev.textContent=d.total||0;}catch(e){}}
 
-// ---- scanner (dynamic html5-qrcode, works on phones) ----
+// ---- scanner using html5-qrcode (external library already loaded) ----
 const scanNotice=document.getElementById("scan-notice"),scanLast=document.getElementById("scanner-last-details"),scanPayBtn=document.getElementById("scanner-payment-btn"),scanManualForm=document.getElementById("scanner-manual-form"),scanManualPhone=document.getElementById("scanner-manual-phone"),scanManualStatus=document.getElementById("scanner-manual-status");
 let qrInstance=null,scanBusy=false;
 
@@ -493,41 +480,41 @@ function handleScanThrottle(text){
   scanBusy=true;
   handleScan(text).finally(()=>setTimeout(()=>{scanBusy=false;},900));
 }
-async function initScanner(){
+
+function initScanner(){
   const container=document.getElementById("qr-reader");
   if(!container)return;
-  if(qrInstance)return;
-  setScanNotice("ok","Loading QR library…","LOADING");
-  try{
-    await loadQrLib();
-  }catch(err){
-    setScanNotice("err","QR library failed to load. Check internet / ad blocker.","ERROR");
+  if(qrInstance)return; // already running
+
+  if(typeof Html5Qrcode==="undefined"){
+    setScanNotice("err","QR library not loaded. Check your connection.","ERROR");
+    container.innerHTML='<span class="muted">QR script failed to load. Make sure internet / ad-block allows unpkg.com.</span>';
     return;
   }
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
-    setScanNotice("err","Camera not supported in this browser.","ERROR");
-    return;
-  }
+
   try{
     qrInstance=new Html5Qrcode("qr-reader");
-    setScanNotice("ok","Starting camera…","WORKING");
+    setScanNotice("ok","Starting camera…","LOADING");
     qrInstance.start(
       {facingMode:"environment"},
       {fps:10,qrbox:{width:250,height:250}},
       text=>handleScanThrottle(text),
-      ()=>{}
+      () => {}
     ).then(()=>setScanNotice("ok","Scanner ready. Point a QR.","READY"))
-     .catch(err=>{console.error(err);setScanNotice("err","Camera start failed: "+err,"ERROR");});
+     .catch(err=>{console.error(err);setScanNotice("err","Camera start failed: "+(err.message||err),"ERROR");});
   }catch(e){
     console.error(e);
-    setScanNotice("err","Failed to initialize scanner: "+e,"ERROR");
+    setScanNotice("err","Failed to initialize scanner: "+(e.message||e),"ERROR");
   }
 }
+
 function stopScanner(){
   if(qrInstance){
     const inst=qrInstance;qrInstance=null;
-    inst.stop().catch(()=>{}).finally(()=>{try{inst.clear().catch(()=>{});}catch(e){}});
+    inst.stop().catch(()=>{}).finally(()=>{try{inst.clear();}catch(e){}});
   }
+  const container=document.getElementById("qr-reader");
+  if(container)container.innerHTML='<span class="muted">Camera view will appear here.</span>';
 }
 
 scanPayBtn.onclick=()=>{if(!lastScan||lastScan.is_free)return;openPayModal({student_id:lastScan.student_id,class_id:lastScan.class_id,name:lastScan.name,month:lastScan.month});};
@@ -840,7 +827,7 @@ app.get("/students/:id/qr", (req, res) => {
   }
 });
 
-// all QR cards in one printable page
+// all QR cards printable
 app.get("/students/qr/all", async (req, res) => {
   try {
     const students = db
@@ -902,7 +889,7 @@ app.post("/scan/:token/auto", (req, res) => {
   }
 });
 
-// attendance list for class+date
+// attendance list
 app.get("/api/attendance/list", (req, res) => {
   try {
     const class_id = Number(req.query.class_id),
