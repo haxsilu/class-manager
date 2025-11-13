@@ -377,37 +377,17 @@ const jdel=u=>fetch(u,{method:"DELETE"}).then(async r=>{const d=await r.json().c
 const curMonth=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");};
 const today=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");};
 
-// ---- dynamic QR library loader with multiple CDNs ----
+// ---- dynamic QR library loader (fix for phones) ----
 let qrLibPromise=null;
-const QR_LIB_URLS=[
-  "https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.10/html5-qrcode.min.js",
-  "https://unpkg.com/html5-qrcode@2.3.10",
-  "https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.10"
-];
-
 function loadQrLib(){
   if(typeof Html5Qrcode!=="undefined") return Promise.resolve();
   if(qrLibPromise) return qrLibPromise;
   qrLibPromise=new Promise((resolve,reject)=>{
-    let idx=0;
-    const tryNext=()=>{
-      if(typeof Html5Qrcode!=="undefined") return resolve();
-      if(idx>=QR_LIB_URLS.length) return reject(new Error("All CDNs failed"));
-      const url=QR_LIB_URLS[idx++];
-      const s=document.createElement("script");
-      s.src=url;
-      s.async=true;
-      s.onload=()=>{ 
-        if(typeof Html5Qrcode!=="undefined") resolve();
-        else {
-          console.warn("QR lib loaded from",url,"but Html5Qrcode missing, trying next");
-          tryNext();
-        }
-      };
-      s.onerror=()=>{console.warn("Failed to load QR lib from",url);tryNext();};
-      document.head.appendChild(s);
-    };
-    tryNext();
+    const s=document.createElement("script");
+    s.src="https://unpkg.com/html5-qrcode@2.3.10";
+    s.onload=()=>resolve();
+    s.onerror=()=>reject(new Error("QR library failed to load"));
+    document.head.appendChild(s);
   });
   return qrLibPromise;
 }
@@ -468,7 +448,7 @@ async function loadStudents(){
 }
 async function refreshStats(){try{const d=await jget("/api/finance?month="+encodeURIComponent(curMonth()));statRev.textContent=d.total||0;}catch(e){}}
 
-// ---- scanner (html5-qrcode with multi-CDN loader) ----
+// ---- scanner (dynamic html5-qrcode, works on phones) ----
 const scanNotice=document.getElementById("scan-notice"),scanLast=document.getElementById("scanner-last-details"),scanPayBtn=document.getElementById("scanner-payment-btn"),scanManualForm=document.getElementById("scanner-manual-form"),scanManualPhone=document.getElementById("scanner-manual-phone"),scanManualStatus=document.getElementById("scanner-manual-status");
 let qrInstance=null,scanBusy=false;
 
@@ -521,7 +501,7 @@ async function initScanner(){
   try{
     await loadQrLib();
   }catch(err){
-    setScanNotice("err","QR library failed to load in this page. Check internet / ad blocker.","ERROR");
+    setScanNotice("err","QR library failed to load. Check internet / ad blocker.","ERROR");
     return;
   }
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
@@ -860,7 +840,7 @@ app.get("/students/:id/qr", (req, res) => {
   }
 });
 
-// all QR cards printable
+// all QR cards in one printable page
 app.get("/students/qr/all", async (req, res) => {
   try {
     const students = db
@@ -922,7 +902,7 @@ app.post("/scan/:token/auto", (req, res) => {
   }
 });
 
-// attendance list
+// attendance list for class+date
 app.get("/api/attendance/list", (req, res) => {
   try {
     const class_id = Number(req.query.class_id),
