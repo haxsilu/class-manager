@@ -536,8 +536,8 @@ const FRONTEND_HTML = `<!doctype html>
       }
     }
   </style>
-  <!-- QR library -->
-  <script src="https://unpkg.com/html5-qrcode@2.3.10/minified/html5-qrcode.min.js"></script>
+  <!-- QR library (correct path under /dist/) -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.10/dist/html5-qrcode.min.js"></script>
 </head>
 <body>
 <header>
@@ -703,19 +703,19 @@ const FRONTEND_HTML = `<!doctype html>
         </form>
 
         <button type="button" class="btn btn-outline btn-small" id="scanner-payment-btn" disabled style="margin-top:0.6rem;">
-          Record payment for last scan
+          Record payment for last attendance
         </button>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div>
-            <div class="card-title">Last scan</div>
-            <div class="card-subtitle">Details of the most recent QR.</div>
+            <div class="card-title">Last attendance</div>
+            <div class="card-subtitle">Details of the most recent scan or manual mark.</div>
           </div>
         </div>
         <div id="scanner-last-details" class="muted">
-          No scans yet.
+          No attendance yet.
         </div>
       </div>
     </div>
@@ -1271,6 +1271,18 @@ const FRONTEND_HTML = `<!doctype html>
     }
   }
 
+  function updateLastAttendanceView(res) {
+    const st = res.student;
+    const paidLabel = st.is_free ? "FREE CARD" : (res.paid ? "PAID" : "UNPAID");
+    const paidColorClass = st.is_free ? "tag-free" : (res.paid ? "tag-paid" : "tag-unpaid");
+    scannerLastDetails.innerHTML =
+      "<div class='pill pill-quiet'>Name: <strong>" + st.name + "</strong></div>" +
+      "<div class='pill pill-quiet'>Phone: " + (st.phone || "-") + "</div>" +
+      "<div class='pill pill-quiet'>Class: " + st.grade + "</div>" +
+      "<div class='pill pill-quiet'>Today: " + res.date + "</div>" +
+      "<div style='margin-top:0.4rem;'><span class='tag " + paidColorClass + "'>" + paidLabel + " · " + res.month + "</span></div>";
+  }
+
   const onScanSuccess = async (decodedText) => {
     let token = (decodedText || "").trim();
     try {
@@ -1290,26 +1302,19 @@ const FRONTEND_HTML = `<!doctype html>
     try {
       const res = await apiPost("/scan/" + encodeURIComponent(token) + "/auto", {});
       playBeep();
-      const st = res.student;
       lastScanInfo = {
-        student_id: st.id,
+        student_id: res.student.id,
         class_id: res.class_id,
-        name: st.name,
-        grade: st.grade,
-        is_free: st.is_free,
+        name: res.student.name,
+        grade: res.student.grade,
+        is_free: res.student.is_free,
         paid: res.paid,
         month: res.month
       };
-      const paidLabel = st.is_free ? "FREE CARD" : (res.paid ? "PAID" : "UNPAID");
-      const paidColorClass = st.is_free ? "tag-free" : (res.paid ? "tag-paid" : "tag-unpaid");
-      setScanNotice("ok", "Attendance recorded for " + st.name + ".", paidLabel);
-      scannerLastDetails.innerHTML =
-        "<div class='pill pill-quiet'>Name: <strong>" + st.name + "</strong></div>" +
-        "<div class='pill pill-quiet'>Phone: " + (st.phone || "-") + "</div>" +
-        "<div class='pill pill-quiet'>Class: " + st.grade + "</div>" +
-        "<div class='pill pill-quiet'>Today: " + res.date + "</div>" +
-        "<div style='margin-top:0.4rem;'><span class='tag " + paidColorClass + "'>" + paidLabel + " · " + res.month + "</span></div>";
-      scannerPaymentBtn.disabled = !!st.is_free;
+      updateLastAttendanceView(res);
+      const paidLabel = res.student.is_free ? "FREE CARD" : (res.paid ? "PAID" : "UNPAID");
+      setScanNotice("ok", "Attendance recorded for " + res.student.name + ".", paidLabel);
+      scannerPaymentBtn.disabled = !!res.student.is_free;
     } catch (err) {
       setScanNotice("err", err.message || "Scan failed.", "ERROR");
     }
@@ -1365,11 +1370,26 @@ const FRONTEND_HTML = `<!doctype html>
       return;
     }
     try {
-      await apiPost("/api/attendance/manual-today-by-phone", { phone });
+      const res = await apiPost("/api/attendance/manual-today-by-phone", { phone });
+      playBeep();
       scannerManualStatus.textContent = "Attendance marked for today.";
       scannerManualPhone.value = "";
+      lastScanInfo = {
+        student_id: res.student.id,
+        class_id: res.class_id,
+        name: res.student.name,
+        grade: res.student.grade,
+        is_free: res.student.is_free,
+        paid: res.paid,
+        month: res.month
+      };
+      updateLastAttendanceView(res);
+      const paidLabel = res.student.is_free ? "FREE CARD" : (res.paid ? "PAID" : "UNPAID");
+      setScanNotice("ok", "Attendance recorded for " + res.student.name + " (manual).", paidLabel);
+      scannerPaymentBtn.disabled = !!res.student.is_free;
     } catch (err) {
       scannerManualStatus.textContent = err.message || "Failed to mark attendance.";
+      setScanNotice("err", err.message || "Manual mark failed.", "ERROR");
     }
   });
 
@@ -1944,20 +1964,28 @@ app.post("/api/attendance/manual-today-by-phone", (req, res) => {
     const { phone } = req.body || {};
     if (!phone) return res.status(400).json({ error: "phone required" });
     const student = db
-      .prepare("SELECT id, grade FROM students WHERE phone = ?")
+      .prepare("SELECT id, name, phone, grade, is_free FROM students WHERE phone = ?")
       .get(phone.trim());
     if (!student) {
       return res.status(404).json({ error: "Student not found for this phone" });
     }
     const cls = getClassByGrade(student.grade);
     if (!cls) return res.status(500).json({ error: "Class not found" });
+
     const date = getTodayDate();
+    const month = getCurrentMonth();
     db.prepare(`
       INSERT INTO attendance (student_id, class_id, date, present)
       VALUES (?, ?, ?, 1)
       ON CONFLICT(student_id, class_id, date) DO UPDATE SET present = 1
     `).run(student.id, cls.id, date);
-    res.json({ success: true, date, class_id: cls.id, student_id: student.id });
+
+    const payment = db
+      .prepare("SELECT id FROM payments WHERE student_id = ? AND class_id = ? AND month = ?")
+      .get(student.id, cls.id, month);
+    const paid = !!payment;
+
+    res.json({ success: true, student, class_id: cls.id, date, month, paid });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to mark attendance" });
