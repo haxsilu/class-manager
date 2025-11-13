@@ -82,7 +82,6 @@ function generateQrToken() {
 }
 
 function getTodayDate() {
-  // YYYY-MM-DD
   const d = new Date();
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, "0");
@@ -507,6 +506,7 @@ const FRONTEND_HTML = `<!doctype html>
       overflow: hidden;
       border: 1px solid var(--border);
       margin-bottom: 0.7rem;
+      background: #020617;
     }
     #qr-reader__scan_region {
       background: #020617;
@@ -682,7 +682,7 @@ const FRONTEND_HTML = `<!doctype html>
         </div>
         <div id="qr-reader"></div>
         <div class="muted" style="margin-bottom:0.6rem;">
-          Hint: Each student's QR encodes a secure token that maps back to their profile. Attendance is only recorded once per day.
+          When you open this tab, the camera will request permission and start scanning automatically.
         </div>
         <button type="button" class="btn btn-outline btn-small" id="scanner-payment-btn" disabled>
           Record payment for last scan
@@ -1088,7 +1088,7 @@ const FRONTEND_HTML = `<!doctype html>
   async function refreshClasses() {
     try {
       const data = await apiGet("/api/classes");
-      cachedClasses = data.classes || [];
+      cachedClasses = (data && data.classes) || [];
     } catch (err) {
       console.error("Failed to load classes", err);
     }
@@ -1102,7 +1102,7 @@ const FRONTEND_HTML = `<!doctype html>
   async function refreshStudents() {
     try {
       const data = await apiGet("/api/students");
-      const students = data.students || [];
+      const students = (data && data.students) || [];
       studentsTableBody.innerHTML = "";
       let freeCount = 0;
       students.forEach(st => {
@@ -1186,7 +1186,7 @@ const FRONTEND_HTML = `<!doctype html>
     try {
       const month = getCurrentMonthStr();
       const data = await apiGet("/api/finance?month=" + encodeURIComponent(month));
-      const total = data.total || 0;
+      const total = (data && data.total) || 0;
       statMonthRevenue.textContent = total;
     } catch (err) {
       console.error("Failed to load stats", err);
@@ -1194,19 +1194,23 @@ const FRONTEND_HTML = `<!doctype html>
   }
 
   // ---------- SCANNER ----------
-  let scannerInitialized = false;
-  let html5QrCodeInstance = null;
+  let scannerRendered = false;
+  let html5QrcodeScannerInstance = null;
   const scanNotice = document.getElementById("scan-notice");
   const scannerLastDetails = document.getElementById("scanner-last-details");
   const scannerPaymentBtn = document.getElementById("scanner-payment-btn");
 
   function setScanNotice(type, message, tagText) {
+    if (!scanNotice) return;
     scanNotice.classList.remove("ok", "err");
     if (type === "ok") scanNotice.classList.add("ok");
     if (type === "err") scanNotice.classList.add("err");
-    scanNotice.querySelector("div").innerHTML = "<strong>" + message + "</strong>";
+    const textDiv = scanNotice.querySelector("div");
+    if (textDiv) {
+      textDiv.innerHTML = "<strong>" + message + "</strong>";
+    }
     const tag = scanNotice.querySelector(".tag");
-    if (tag) tag.textContent = (tagText || "").toUpperCase();
+    if (tag && tagText) tag.textContent = tagText.toUpperCase();
   }
 
   function playBeep() {
@@ -1227,74 +1231,83 @@ const FRONTEND_HTML = `<!doctype html>
     }
   }
 
+  const onScanSuccess = async (decodedText /*, decodedResult*/) => {
+    let token = (decodedText || "").trim();
+    try {
+      const idx = token.lastIndexOf("/scan/");
+      if (idx !== -1) {
+        token = token.substring(idx + "/scan/".length);
+      } else {
+        const parts = token.split("/");
+        token = parts[parts.length - 1];
+      }
+    } catch (e) {}
+    if (!token) {
+      setScanNotice("err", "Invalid QR content.", "ERROR");
+      return;
+    }
+    setScanNotice("ok", "Processing scan…", "WORKING");
+    try {
+      const res = await apiPost("/scan/" + encodeURIComponent(token) + "/auto", {});
+      playBeep();
+      const st = res.student;
+      lastScanInfo = {
+        student_id: st.id,
+        class_id: res.class_id,
+        name: st.name,
+        grade: st.grade,
+        is_free: st.is_free,
+        paid: res.paid,
+        month: res.month
+      };
+      const paidLabel = st.is_free ? "FREE CARD" : (res.paid ? "PAID" : "UNPAID");
+      const paidColorClass = st.is_free ? "tag-free" : (res.paid ? "tag-paid" : "tag-unpaid");
+      setScanNotice("ok", "Attendance recorded for " + st.name + ".", paidLabel);
+      scannerLastDetails.innerHTML =
+        "<div class='pill pill-quiet'>Name: <strong>" + st.name + "</strong></div>" +
+        "<div class='pill pill-quiet'>Phone: " + (st.phone || "-") + "</div>" +
+        "<div class='pill pill-quiet'>Class: " + st.grade + "</div>" +
+        "<div class='pill pill-quiet'>Today: " + res.date + "</div>" +
+        "<div style='margin-top:0.4rem;'><span class='tag " + paidColorClass + "'>" + paidLabel + " · " + res.month + "</span></div>";
+      scannerPaymentBtn.disabled = !!st.is_free;
+    } catch (err) {
+      setScanNotice("err", err.message || "Scan failed.", "ERROR");
+    }
+  };
+
+  const onScanFailure = (error) => {
+    // called frequently; keep silent to avoid spamming
+  };
+
   function initScanner() {
-    if (scannerInitialized) return;
+    if (scannerRendered) return;
     const qrReaderElem = document.getElementById("qr-reader");
-    if (!qrReaderElem || !window.Html5Qrcode) return;
+    if (!qrReaderElem) return;
 
-    html5QrCodeInstance = new Html5Qrcode("qr-reader");
-    const config = { fps: 10, qrbox: 220 };
+    if (typeof Html5QrcodeScanner === "undefined") {
+      setScanNotice("err", "QR library not loaded. Check your connection.", "ERROR");
+      return;
+    }
 
-    const onScanSuccess = async (decodedText) => {
-      // Extract token from URL or plain token
-      let token = decodedText.trim();
-      try {
-        const idx = token.lastIndexOf("/scan/");
-        if (idx !== -1) {
-          token = token.substring(idx + "/scan/".length);
-        } else {
-          // maybe last segment
-          const parts = token.split("/");
-          token = parts[parts.length - 1];
+    try {
+      const config = { fps: 10, qrbox: 220 };
+      html5QrcodeScannerInstance = new Html5QrcodeScanner("qr-reader", config, false);
+      html5QrcodeScannerInstance.render(onScanSuccess, onScanFailure);
+      scannerRendered = true;
+
+      // Try to auto-click the "Start Scanning" button so camera opens immediately
+      setTimeout(() => {
+        const startBtn = document.querySelector("#qr-reader button");
+        if (startBtn) {
+          startBtn.click();
         }
-      } catch (e) {}
+      }, 600);
 
-      if (!token) {
-        setScanNotice("err", "Invalid QR content.", "ERROR");
-        return;
-      }
-
-      setScanNotice("ok", "Processing scan…", "WORKING");
-      try {
-        const res = await apiPost("/scan/" + encodeURIComponent(token) + "/auto", {});
-        playBeep();
-        const st = res.student;
-        lastScanInfo = {
-          student_id: st.id,
-          class_id: res.class_id,
-          name: st.name,
-          grade: st.grade,
-          is_free: st.is_free,
-          paid: res.paid,
-          month: res.month
-        };
-        const paidLabel = st.is_free ? "FREE CARD" : (res.paid ? "PAID" : "UNPAID");
-        const paidColorClass = st.is_free ? "tag-free" : (res.paid ? "tag-paid" : "tag-unpaid");
-        setScanNotice("ok", "Attendance recorded for " + st.name + ".", paidLabel);
-        scannerLastDetails.innerHTML =
-          "<div class='pill pill-quiet'>Name: <strong>" + st.name + "</strong></div>" +
-          "<div class='pill pill-quiet'>Phone: " + (st.phone || "-") + "</div>" +
-          "<div class='pill pill-quiet'>Class: " + st.grade + "</div>" +
-          "<div class='pill pill-quiet'>Today: " + res.date + "</div>" +
-          "<div style='margin-top:0.4rem;'><span class='tag " + paidColorClass + "'>" + paidLabel + " · " + res.month + "</span></div>";
-        scannerPaymentBtn.disabled = !!st.is_free;
-      } catch (err) {
-        setScanNotice("err", err.message || "Scan failed.", "ERROR");
-      }
-    };
-
-    const onScanFailure = (err) => {
-      // ignore continuous decode errors
-    };
-
-    html5QrCodeInstance.start({ facingMode: "environment" }, config, onScanSuccess, onScanFailure)
-      .then(() => {
-        scannerInitialized = true;
-      })
-      .catch((err) => {
-        console.error("Scanner start failed", err);
-        setScanNotice("err", "Unable to start camera. Check permissions.", "ERROR");
-      });
+      setScanNotice("ok", "Scanner ready. Point a QR code to the camera.", "READY");
+    } catch (err) {
+      console.error("Scanner init failed", err);
+      setScanNotice("err", "Unable to start camera. Check permissions.", "ERROR");
+    }
   }
 
   scannerPaymentBtn.addEventListener("click", () => {
@@ -1331,7 +1344,7 @@ const FRONTEND_HTML = `<!doctype html>
       const classId = classIdForGrade(grade);
       if (!classId) throw new Error("Class not found in system.");
       const data = await apiGet("/api/attendance/list?class_id=" + encodeURIComponent(classId) + "&date=" + encodeURIComponent(date));
-      const records = data.records || [];
+      const records = (data && data.records) || [];
       attendanceTableBody.innerHTML = "";
       records.forEach(r => {
         const tr = document.createElement("tr");
@@ -1362,7 +1375,6 @@ const FRONTEND_HTML = `<!doctype html>
     try {
       await apiPost("/api/attendance/manual", payload);
       attendanceManualStatus.textContent = "Attendance marked.";
-      // refresh sheet if matching
       if (attendanceClassInput.value === payload.grade && attendanceDateInput.value === payload.date) {
         attendanceLoadForm.dispatchEvent(new Event("submit"));
       }
@@ -1385,7 +1397,7 @@ const FRONTEND_HTML = `<!doctype html>
     if (!month) return;
     try {
       const data = await apiGet("/api/unpaid?month=" + encodeURIComponent(month));
-      const items = data.unpaid || [];
+      const items = (data && data.unpaid) || [];
       unpaidTableBody.innerHTML = "";
       items.forEach(item => {
         const tr = document.createElement("tr");
@@ -1430,8 +1442,8 @@ const FRONTEND_HTML = `<!doctype html>
     if (!month) return;
     try {
       const data = await apiGet("/api/finance?month=" + encodeURIComponent(month));
-      const rows = data.rows || [];
-      const total = data.total || 0;
+      const rows = (data && data.rows) || [];
+      const total = (data && data.total) || 0;
       financeTableBody.innerHTML = "";
       rows.forEach(r => {
         const tr = document.createElement("tr");
@@ -1499,7 +1511,7 @@ const FRONTEND_HTML = `<!doctype html>
       await apiPost("/api/payments/record", payload);
       paymentStatus.textContent = "Payment saved.";
       await refreshStats();
-      unpaidForm.dispatchEvent(new Event("submit")); // refresh unpaid if visible
+      unpaidForm.dispatchEvent(new Event("submit"));
     } catch (err) {
       paymentStatus.textContent = err.message || "Failed to save payment.";
     }
@@ -1522,6 +1534,11 @@ const FRONTEND_HTML = `<!doctype html>
 // Serve SPA
 app.get("/", (req, res) => {
   res.type("html").send(FRONTEND_HTML);
+});
+
+// Health check (optional)
+app.get("/healthz", (req, res) => {
+  res.json({ ok: true });
 });
 
 // Download DB
