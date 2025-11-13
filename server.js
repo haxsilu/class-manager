@@ -312,7 +312,10 @@ footer{
     <div class="card">
       <div class="card-header">
         <div><div class="card-title">All students</div><div class="card-subtitle">Edit / QR / delete.</div></div>
-        <div class="pill pill-quiet" id="students-count-pill">0 students</div>
+        <div class="flex-row">
+          <a href="/students/qr/all" target="_blank" class="btn btn-small">Print all QRs</a>
+          <div class="pill pill-quiet" id="students-count-pill">0 students</div>
+        </div>
       </div>
       <div class="table-container">
         <table><thead><tr>
@@ -1095,7 +1098,7 @@ app.delete("/api/students/:id", (req, res) => {
   }
 });
 
-// QR page: modern blue-glow card, only name + grade + "Science Zone by TS"
+// QR page: modern blue-glow card, only name + grade + "Science Zone by TS", clean for print
 app.get("/students/:id/qr", (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -1111,7 +1114,7 @@ app.get("/students/:id/qr", (req, res) => {
 <html>
 <head>
 <meta charset="utf-8" />
-<title>QR | ${s.name}</title>
+<title>${s.name} | QR</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{
@@ -1120,14 +1123,13 @@ body{
   justify-content:center;
   align-items:center;
   font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
-  background:radial-gradient(circle at top,#020617 0,#020617 38%,#020617 100%);
+  background:#ffffff;
   color:#e2e8f0;
 }
 .card-wrap{
   padding:2px;
   border-radius:24px;
   background:linear-gradient(135deg,rgba(59,130,246,1),rgba(37,99,235,.3));
-  box-shadow:0 0 40px rgba(37,99,235,.45);
 }
 .card{
   width:320px;
@@ -1152,11 +1154,9 @@ body{
   padding:14px;
   border-radius:18px;
   border:1px solid rgba(148,163,184,.35);
-  box-shadow:0 0 0 1px rgba(15,23,42,1),0 0 30px rgba(30,64,175,.55);
   margin-bottom:18px;
 }
 .qr-box img{
-  display:block;
   width:230px;
   height:230px;
   background:#ffffff;
@@ -1168,24 +1168,11 @@ body{
   font-weight:600;
   letter-spacing:.08em;
   text-transform:uppercase;
-}
-button{
-  margin-top:14px;
-  padding:7px 16px;
-  border-radius:999px;
-  border:1px solid rgba(59,130,246,.9);
-  background:#1d4ed8;
-  color:#e5e7eb;
-  font-size:.8rem;
-  cursor:pointer;
-}
-button:hover{
-  background:#2563eb;
+  margin-top:4px;
 }
 @media print{
   body{background:#ffffff;}
   .card-wrap{box-shadow:none;background:none;}
-  .card{border:1px solid #e5e7eb;}
 }
 </style>
 </head>
@@ -1196,7 +1183,6 @@ button:hover{
     <div class="grade">${s.grade}</div>
     <div class="qr-box"><img src="${url}" alt="QR code" /></div>
     <div class="brand">Science Zone by TS</div>
-    <button onclick="window.print()">Print</button>
   </div>
 </div>
 </body>
@@ -1205,6 +1191,113 @@ button:hover{
     });
   } catch (e) {
     console.error(e);res.status(500).send("Error");
+  }
+});
+
+// All QRs page: print all QR cards at once
+app.get("/students/qr/all", async (req, res) => {
+  try {
+    const students = db.prepare("SELECT id,name,grade,qr_token FROM students ORDER BY grade,name").all();
+    const host = `${req.protocol}://${req.get("host")}`;
+    const cards = [];
+    for (const s of students) {
+      let token = s.qr_token;
+      if (!token) {
+        token = generateQrToken();
+        db.prepare("UPDATE students SET qr_token=? WHERE id=?").run(token, s.id);
+      }
+      const qrContent = `${host}/scan/${token}`;
+      const url = await QRCode.toDataURL(qrContent, { margin: 1, scale: 5 });
+      cards.push(`
+      <div class="card-wrap">
+        <div class="card">
+          <div class="name">${s.name}</div>
+          <div class="grade">${s.grade}</div>
+          <div class="qr-box">
+            <img src="${url}" alt="QR code" />
+          </div>
+          <div class="brand">Science Zone by TS</div>
+        </div>
+      </div>`);
+    }
+    const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>All QR Codes</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{
+  margin:20px;
+  font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+  background:#ffffff;
+}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+  gap:16px;
+}
+.card-wrap{
+  padding:2px;
+  border-radius:24px;
+  background:linear-gradient(135deg,rgba(59,130,246,1),rgba(37,99,235,.3));
+}
+.card{
+  background:#020617;
+  border-radius:22px;
+  padding:18px 16px 14px;
+  text-align:center;
+}
+.name{
+  color:#f9fafb;
+  font-size:1.1rem;
+  font-weight:600;
+}
+.grade{
+  color:#9ca3af;
+  margin-bottom:10px;
+  font-size:.85rem;
+}
+.qr-box{
+  padding:10px;
+  background:#020617;
+  border-radius:16px;
+  border:1px solid rgba(148,163,184,.4);
+  margin-bottom:8px;
+}
+.qr-box img{
+  width:190px;
+  height:190px;
+  background:#ffffff;
+  border-radius:10px;
+}
+.brand{
+  margin-top:4px;
+  color:#38bdf8;
+  font-size:.75rem;
+  font-weight:600;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
+@media print{
+  body{margin:0;}
+}
+</style>
+</head>
+<body>
+<div class="grid">
+${cards.join("\n")}
+</div>
+<script>
+  // Auto open print dialog when page loads
+  window.onload = function(){ window.print(); };
+</script>
+</body>
+</html>`;
+    res.type("html").send(html);
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("Error generating all QRs");
   }
 });
 
