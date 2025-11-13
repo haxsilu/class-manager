@@ -9,14 +9,10 @@ const QRCode = require("qrcode");
 const Database = require("better-sqlite3");
 
 const PORT = process.env.PORT || 5050;
-const DB_FILE = path.join(__dirname, "class_manager.db");
+// Use Railway volume so DB survives deploys (attach volume at /app/data)
+const DB_FILE = path.join("/app/data", "class_manager.db");
 
-// ---------- DB SETUP ----------
-if (!fs.existsSync(DB_FILE)) fs.closeSync(fs.openSync(DB_FILE, "w"));
-const db = new Database(DB_FILE);
-db.pragma("foreign_keys = ON");
-
-db.exec(`
+const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS classes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL UNIQUE,
@@ -52,16 +48,29 @@ CREATE TABLE IF NOT EXISTS payments (
   FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE,
   FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE
 );
-`);
+`;
 
-// seed classes once
-if (db.prepare("SELECT COUNT(*) c FROM classes").get().c === 0) {
-  const insert = db.prepare("INSERT INTO classes (title,fee) VALUES (?,2000)");
-  const tx = db.transaction(() => {
-    ["Grade 6", "Grade 7", "Grade 8", "O/L"].forEach(t => insert.run(t));
-  });
-  tx();
+if (!fs.existsSync(path.dirname(DB_FILE))) {
+  fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
 }
+if (!fs.existsSync(DB_FILE)) {
+  fs.closeSync(fs.openSync(DB_FILE, "w"));
+}
+
+let db;
+function openDatabase() {
+  db = new Database(DB_FILE);
+  db.pragma("foreign_keys = ON");
+  db.exec(SCHEMA_SQL);
+  if (db.prepare("SELECT COUNT(*) c FROM classes").get().c === 0) {
+    const insert = db.prepare("INSERT INTO classes (title,fee) VALUES (?,2000)");
+    const tx = db.transaction(() => {
+      ["Grade 6", "Grade 7", "Grade 8", "O/L"].forEach(t => insert.run(t));
+    });
+    tx();
+  }
+}
+openDatabase();
 
 // helpers
 const generateQrToken = () =>
@@ -79,7 +88,7 @@ const getClassByGrade = (grade) =>
 
 // ---------- EXPRESS ----------
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "20mb" })); // allow DB upload base64
 
 // ---------- FRONTEND ----------
 const FRONTEND_HTML = `<!doctype html>
@@ -337,7 +346,7 @@ footer{
           <div><strong>Scanner idle.</strong> Open camera to begin.</div><div class="tag">READY</div>
         </div>
         <div id="qr-reader"></div>
-        <div class="muted">Browser must support camera + QR detection (BarcodeDetector). Use Chrome-based browsers if possible.</div>
+        <div class="muted">Browser must support camera + QR detection (BarcodeDetector). Use Chrome-based browsers.</div>
 
         <form id="scanner-manual-form" style="margin-top:.75rem;">
           <div class="card-subtitle" style="margin-bottom:.35rem;">Manual attendance (phone → today)</div>
@@ -463,13 +472,23 @@ footer{
   <section id="tab-settings" class="tab-section">
     <div class="cards">
       <div class="card">
-        <div class="card-header"><div><div class="card-title">Database</div><div class="card-subtitle">Backup & inspect.</div></div></div>
-        <p class="muted">Download the SQLite file. Attach a Railway volume to keep <code>class_manager.db</code> across deploys.</p>
+        <div class="card-header"><div><div class="card-title">Database</div><div class="card-subtitle">Backup, upload & inspect.</div></div></div>
+        <p class="muted">Download or upload the SQLite file. The DB is stored in <code>/app/data/class_manager.db</code> on Railway.</p>
         <div class="flex-row" style="margin-bottom:.5rem;">
           <a href="/admin/db/download" class="btn btn-small" download>Download DB</a>
           <button type="button" id="db-info-btn" class="btn btn-outline btn-small">Show DB info</button>
         </div>
+        <div class="input-row">
+          <div class="field">
+            <label>Upload .db</label>
+            <input type="file" id="db-upload-file" accept=".db,.sqlite,.sqlite3" />
+          </div>
+          <div class="field" style="flex:0 0 auto;margin-top:1.2rem;">
+            <button type="button" id="db-upload-btn" class="btn btn-outline btn-small">Upload DB</button>
+          </div>
+        </div>
         <div class="muted" id="db-info-text"></div>
+        <div class="muted" id="db-upload-status" style="margin-top:.35rem;"></div>
       </div>
       <div class="card">
         <div class="card-header"><div><div class="card-title">Exports</div><div class="card-subtitle">CSV snapshots.</div></div></div>
@@ -746,7 +765,7 @@ function initScanner(){
   if(!barcodeSupported||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
     setScanNotice("err","QR scanning not supported in this browser.","ERROR");return;
   }
-  if(videoStream)return; // already running
+  if(videoStream)return;
   container.innerHTML="";
   videoElem=document.createElement("video");
   videoElem.setAttribute("autoplay",true);
@@ -799,7 +818,7 @@ scannerManualForm.addEventListener("submit",async e=>{
   }
 });
 
-// attendance view (no manual here)
+// attendance view
 const attLoadForm=document.getElementById("attendance-load-form");
 const attClassInput=document.getElementById("attendance-class");
 const attDateInput=document.getElementById("attendance-date");
@@ -928,9 +947,13 @@ paymentForm.addEventListener("submit",async e=>{
   }catch(err){paymentStatus.textContent=err.message||"Failed to save.";}
 });
 
-// settings db info
+// settings db info + upload
 const dbInfoBtn=document.getElementById("db-info-btn");
 const dbInfoText=document.getElementById("db-info-text");
+const dbUploadFile=document.getElementById("db-upload-file");
+const dbUploadBtn=document.getElementById("db-upload-btn");
+const dbUploadStatus=document.getElementById("db-upload-status");
+
 dbInfoBtn.addEventListener("click",async()=>{
   try{
     const i=await apiGet("/admin/db/info");
@@ -939,7 +962,24 @@ dbInfoBtn.addEventListener("click",async()=>{
   }catch(err){dbInfoText.textContent=err.message||"Failed to load DB info.";}
 });
 
-// periodic lightweight refresh (pseudo real-time)
+dbUploadBtn.addEventListener("click",async()=>{
+  const file=dbUploadFile.files[0];
+  if(!file){dbUploadStatus.textContent="Choose a .db file first.";return;}
+  dbUploadStatus.textContent="Uploading database…";
+  try{
+    const buffer=await file.arrayBuffer();
+    const bytes=new Uint8Array(buffer);
+    let binary="";for(let i=0;i<bytes.length;i++){binary+=String.fromCharCode(bytes[i]);}
+    const base64=btoa(binary);
+    await apiPost("/admin/db/upload",{data:base64});
+    dbUploadStatus.textContent="Database uploaded. Please refresh this page.";
+  }catch(err){
+    console.error(err);
+    dbUploadStatus.textContent=err.message||"Upload failed.";
+  }
+});
+
+// periodic lightweight refresh
 setInterval(()=>{
   if(activeTab==="students")refreshStudents();
   if(activeTab==="unpaid")unpaidForm.dispatchEvent(new Event("submit"));
@@ -966,6 +1006,7 @@ app.get("/healthz", (req, res) => res.json({ ok: true }));
 
 // DB admin
 app.get("/admin/db/download", (req, res) => res.download(DB_FILE, "class_manager.db"));
+
 app.get("/admin/db/info", (req, res) => {
   try {
     const st = fs.statSync(DB_FILE);
@@ -979,6 +1020,26 @@ app.get("/admin/db/info", (req, res) => {
     res.status(500).json({ error: "Failed to get DB info" });
   }
 });
+
+// upload DB (base64 in JSON), auto-reopen
+app.post("/admin/db/upload", (req, res) => {
+  try {
+    const { data } = req.body || {};
+    if (!data) return res.status(400).json({ error: "No data provided" });
+    const buf = Buffer.from(data, "base64");
+    if (!buf.length) return res.status(400).json({ error: "Invalid file" });
+
+    if (db) db.close();
+    fs.writeFileSync(DB_FILE, buf);
+    openDatabase();
+    res.json({ success: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to upload DB" });
+  }
+});
+
+// CSV exports
 app.get("/admin/export/students.csv", (req, res) => {
   try {
     const rows = db.prepare("SELECT id,name,phone,grade,is_free,qr_token FROM students ORDER BY id").all();
@@ -1098,7 +1159,7 @@ app.delete("/api/students/:id", (req, res) => {
   }
 });
 
-// QR page: modern blue-glow card, only name + grade + "Science Zone by TS", clean for print
+// QR page: modern card
 app.get("/students/:id/qr", (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -1194,7 +1255,7 @@ body{
   }
 });
 
-// All QRs page: print all QR cards at once
+// All QRs page
 app.get("/students/qr/all", async (req, res) => {
   try {
     const students = db.prepare("SELECT id,name,grade,qr_token FROM students ORDER BY grade,name").all();
@@ -1288,10 +1349,7 @@ body{
 <div class="grid">
 ${cards.join("\n")}
 </div>
-<script>
-  // Auto open print dialog when page loads
-  window.onload = function(){ window.print(); };
-</script>
+<script>window.onload=function(){window.print();};</script>
 </body>
 </html>`;
     res.type("html").send(html);
