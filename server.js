@@ -1,5 +1,5 @@
 // server.js
-// Class Manager / Payments / Attendance in one file (Railway-ready)
+// Class management / payments / attendance system – single file, Railway-ready
 
 const express = require("express");
 const path = require("path");
@@ -9,11 +9,16 @@ const QRCode = require("qrcode");
 const Database = require("better-sqlite3");
 
 const PORT = process.env.PORT || 5050;
+// DB persisted on Railway volume mounted at /app/data
 const DB_FILE = path.join("/app/data", "class_manager.db");
 
 // ---------- DB SETUP ----------
-if (!fs.existsSync(path.dirname(DB_FILE))) fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
-if (!fs.existsSync(DB_FILE)) fs.closeSync(fs.openSync(DB_FILE, "w"));
+if (!fs.existsSync(path.dirname(DB_FILE))) {
+  fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+}
+if (!fs.existsSync(DB_FILE)) {
+  fs.closeSync(fs.openSync(DB_FILE, "w"));
+}
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS classes(
@@ -59,7 +64,7 @@ function openDb() {
   db.exec(SCHEMA_SQL);
   if (db.prepare("SELECT COUNT(*) c FROM classes").get().c === 0) {
     const ins = db.prepare("INSERT INTO classes(title,fee) VALUES(?,2000)");
-    const tx = db.transaction(() => ["Grade 6","Grade 7","Grade 8","O/L"].forEach(t => ins.run(t)));
+    const tx = db.transaction(() => ["Grade 6", "Grade 7", "Grade 8", "O/L"].forEach(t => ins.run(t)));
     tx();
   }
 }
@@ -67,10 +72,12 @@ openDb();
 
 const genToken = () => (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex"));
 const todayStr = () => {
-  const d = new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
 const monthStr = () => {
-  const d = new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
 const classByGrade = g => db.prepare("SELECT * FROM classes WHERE title=?").get(g || "");
 
@@ -146,8 +153,8 @@ tbody tr:hover{background:rgba(30,64,175,.24);}
 footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem 1rem;border-top:1px solid rgba(15,23,42,.96);background:radial-gradient(circle at top left,rgba(15,23,42,.95),rgba(2,6,23,.99));}
 @media(max-width:640px){.header-inner{flex-direction:column;align-items:stretch;}nav{justify-content:flex-start;}}
 </style>
-<!-- html5-qrcode for cross-browser scanner (works on iPhone Safari) -->
-<script src="https://unpkg.com/html5-qrcode@2.3.10" defer></script>
+<!-- Load html5-qrcode BEFORE our app script (no defer) so it's always ready -->
+<script src="https://unpkg.com/html5-qrcode@2.3.10"></script>
 </head><body>
 <header><div class="header-inner">
   <div class="logo"><div class="logo-pill"></div><span>Class Manager</span></div>
@@ -221,10 +228,10 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
 <section id="tab-scanner" class="tab-section">
   <div class="cards">
     <div class="card">
-      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Camera + QR via html5-qrcode.</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
+      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Works on phones (html5-qrcode).</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
       <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Open camera to begin.</div><div class="tag">READY</div></div>
       <div id="qr-reader"></div>
-      <div class="muted">If camera doesn't start, check browser permissions and internet connection.</div>
+      <div class="muted">If camera doesn't start, check browser camera permission and internet access.</div>
 
       <form id="scanner-manual-form" style="margin-top:.75rem;">
         <div class="card-subtitle" style="margin-bottom:.35rem;">Manual attendance (phone → today)</div>
@@ -312,7 +319,7 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
   <div class="cards">
     <div class="card">
       <div class="card-header"><div><div class="card-title">Database</div><div class="card-subtitle">Backup, upload & info.</div></div></div>
-      <p class="muted">DB file path: <code>/app/data/class_manager.db</code> (persisted via Railway volume).</p>
+      <p class="muted">DB path: <code>/app/data/class_manager.db</code> (persists with Railway volume).</p>
       <div class="flex-row" style="margin-bottom:.5rem;">
         <a href="/admin/db/download" class="btn btn-small" download>Download DB</a>
         <button type="button" id="db-info-btn" class="btn btn-outline btn-small">Show DB info</button>
@@ -424,9 +431,9 @@ async function loadStudents(){
 }
 async function refreshStats(){try{const d=await jget("/api/finance?month="+encodeURIComponent(curMonth()));statRev.textContent=d.total||0;}catch(e){}}
 
-// scanner with html5-qrcode
+// scanner (html5-qrcode only; simpler & works on phones)
 const scanNotice=document.getElementById("scan-notice"),scanLast=document.getElementById("scanner-last-details"),scanPayBtn=document.getElementById("scanner-payment-btn"),scanManualForm=document.getElementById("scanner-manual-form"),scanManualPhone=document.getElementById("scanner-manual-phone"),scanManualStatus=document.getElementById("scanner-manual-status");
-let qrInstance=null,isScanning=false,scanLibTries=0,scanLibTimer=null;
+let qrInstance=null,isScanning=false;
 
 function setScanNotice(type,msg,tag){if(!scanNotice)return;scanNotice.classList.remove("ok","err");if(type==="ok")scanNotice.classList.add("ok");if(type==="err")scanNotice.classList.add("err");scanNotice.querySelector("div").innerHTML="<strong>"+msg+"</strong>";if(tag)scanNotice.querySelector(".tag").textContent=tag.toUpperCase();}
 function beep(){try{const ctx=new (window.AudioContext||window.webkitAudioContext)(),o=ctx.createOscillator(),g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.value=880;g.gain.setValueAtTime(.0001,ctx.currentTime);g.gain.exponentialRampToValueAtTime(.4,ctx.currentTime+.01);g.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+.18);o.start();o.stop(ctx.currentTime+.2);}catch(e){}}
@@ -467,12 +474,19 @@ function initScanner(){
   const container=document.getElementById("qr-reader");
   if(!container)return;
   if(qrInstance)return;
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){setScanNotice("err","Camera not supported in this browser.","ERROR");return;}
-  setScanNotice("ok","Loading QR library…","WORKING");
-  const start=()=>{
-    if(qrInstance||!window.Html5Qrcode)return;
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    setScanNotice("err","Camera not supported in this browser.","ERROR");return;
+  }
+  if(typeof Html5Qrcode==="undefined"){
+    setScanNotice("err","QR library failed to load in this page. Check internet / adblock.","ERROR");
+    return;
+  }
+  setScanNotice("ok","Starting camera…","WORKING");
+  try{
     qrInstance=new Html5Qrcode("qr-reader");
-    qrInstance.start({facingMode:"environment"},{fps:10,qrbox:{width:250,height:250}},
+    qrInstance.start(
+      {facingMode:"environment"},
+      {fps:10,qrbox:{width:250,height:250}},
       text=>{
         if(isScanning)return;
         isScanning=true;
@@ -481,18 +495,12 @@ function initScanner(){
       ()=>{}
     ).then(()=>setScanNotice("ok","Scanner ready. Point a QR.","READY"))
      .catch(err=>{console.error(err);setScanNotice("err","Camera start failed: "+err,"ERROR");});
-  };
-  if(window.Html5Qrcode) start();
-  else{
-    scanLibTries=0;
-    scanLibTimer=setInterval(()=>{
-      if(window.Html5Qrcode){clearInterval(scanLibTimer);start();}
-      else if(++scanLibTries>40){clearInterval(scanLibTimer);setScanNotice("err","QR library not loaded. Check your connection.","ERROR");}
-    },150);
+  }catch(e){
+    console.error(e);
+    setScanNotice("err","Failed to initialize scanner: "+e,"ERROR");
   }
 }
 function stopScanner(){
-  if(scanLibTimer){clearInterval(scanLibTimer);scanLibTimer=null;}
   if(qrInstance){
     const inst=qrInstance;qrInstance=null;
     inst.stop().catch(()=>{}).finally(()=>inst.clear().catch?.(()=>{}));
@@ -585,7 +593,7 @@ dbUploadBtn.onclick=async()=>{
   dbUploadStatus.textContent="Uploading…";
   try{
     const buf=new Uint8Array(await f.arrayBuffer());let bin="";for(let i=0;i<buf.length;i++)bin+=String.fromCharCode(buf[i]);const base64=btoa(bin);
-    await jpost("/admin/db/upload",{data:base64});dbUploadStatus.textContent="Database uploaded. Refresh the page."; 
+    await jpost("/admin/db/upload",{data:base64});dbUploadStatus.textContent="Database uploaded. Refresh the page.";
   }catch(err){dbUploadStatus.textContent=err.message||"Upload failed.";}
 };
 
