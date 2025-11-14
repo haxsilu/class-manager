@@ -1,8 +1,9 @@
 // server.js
 // Class management / payments / attendance system – single file, Railway-ready
-// Run once:
+// Install deps once:
 //   npm init -y
-//   npm install express better-sqlite3 qrcode jimp qrcode-reader
+//   npm install express better-sqlite3 qrcode
+// Run:
 //   node server.js
 
 const express = require("express");
@@ -11,8 +12,6 @@ const fs = require("fs");
 const crypto = require("crypto");
 const QRCode = require("qrcode");
 const Database = require("better-sqlite3");
-const Jimp = require("jimp");
-const QrReader = require("qrcode-reader");
 
 const PORT = process.env.PORT || 5050;
 const DB_FILE = path.join("/app/data", "class_manager.db");
@@ -187,8 +186,7 @@ const stmts = {
 
 // ---------- EXPRESS ----------
 const app = express();
-// JSON limit a bit bigger for QR image uploads
-app.use(express.json({ limit: "8mb" }));
+app.use(express.json({ limit: "5mb" }));
 
 // ---------- FRONTEND (SPA) ----------
 const FRONTEND = `<!doctype html><html lang="en"><head>
@@ -254,7 +252,7 @@ tbody tr:hover{background:rgba(30,64,175,.24);}
 .modal-backdrop.active{display:flex;}
 .modal{max-width:420px;width:100%;border-radius:1rem;background:#020617;border:1px solid var(--b);box-shadow:0 18px 42px rgba(0,0,0,.9);padding:1rem;}
 .modal h3{margin:0 0 .6rem;font-size:.95rem;}
-#qr-reader{width:100%;max-width:360px;border-radius:1rem;overflow:hidden;border:1px solid var(--b);margin-bottom:.7rem;background:#020617;min-height:220px;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+#qr-reader{width:100%;max-width:360px;border-radius:1rem;overflow:hidden;border:1px solid var(--b);margin-bottom:.7rem;background:#020617;min-height:220px;display:flex;align-items:center;justify-content:center;}
 #students-search{max-width:160px;}
 footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem 1rem;border-top:1px solid rgba(15,23,42,.96);background:radial-gradient(circle at top left,rgba(15,23,42,.95),rgba(2,6,23,.99));}
 @media(max-width:640px){.header-inner{flex-direction:column;align-items:stretch;}nav{justify-content:flex-start;}}
@@ -342,10 +340,10 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
 <section id="tab-scanner" class="tab-section">
   <div class="cards">
     <div class="card">
-      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Tap box → camera → upload QR.</div></div><span class="badge"><span class="badge-dot"></span>Phone</span></div>
-      <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Tap the box to scan a QR.</div><div class="tag">READY</div></div>
-      <div id="qr-reader"><span class="muted">Tap here on your phone. Camera opens, take a photo of the QR.</span></div>
-      <div class="muted">This works on almost any phone browser. If it fails, use the normal camera app to scan and open the link (it will auto mark attendance).</div>
+      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Camera QR (if supported).</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
+      <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Open scanner to start.</div><div class="tag">READY</div></div>
+      <div id="qr-reader"><span class="muted">When supported, camera preview will appear here and scan QRs automatically.</span></div>
+      <div class="muted">If your phone browser doesn't support in-page scanning, use the normal camera app to scan a QR; it will open a link like <code>/scan/&lt;token&gt;</code> and attendance will be recorded automatically.</div>
 
       <form id="scanner-manual-form" style="margin-top:.75rem;">
         <div class="card-subtitle" style="margin-bottom:.35rem;">Manual attendance (phone → today)</div>
@@ -573,9 +571,9 @@ async function loadStudents(){
 }
 async function refreshStats(){try{const d=await jget("/api/finance?month="+encodeURIComponent(curMonth()));statRev.textContent=d.total||0;}catch(e){}}
 
-// ---- scanner (phone-friendly: image capture upload) ----
+// ---- scanner using BarcodeDetector (no server libs) ----
 const scanNotice=document.getElementById("scan-notice"),scanLast=document.getElementById("scanner-last-details"),scanPayBtn=document.getElementById("scanner-payment-btn"),scanManualForm=document.getElementById("scanner-manual-form"),scanManualPhone=document.getElementById("scanner-manual-phone"),scanManualStatus=document.getElementById("scanner-manual-status");
-let scannerInitialized=false;
+let scannerInitialized=false,scannerStream=null,scannerDetector=null,lastScanRaw=null;
 
 function setScanNotice(type,msg,tag){
   if(!scanNotice)return;
@@ -622,45 +620,73 @@ function applyScanResult(res){
   maybeRefreshAttendance(res.student.grade,res.date);
   refreshFinanceUnpaidNow();
 }
-
-function initScanner(){
+async function handleScannedText(text){
+  if(!text)return;
+  if(text===lastScanRaw)return;
+  lastScanRaw=text;
+  let token;
+  const idx=text.lastIndexOf("/scan/");
+  if(idx!==-1) token=text.slice(idx+6);
+  else {
+    const parts=text.split("/");
+    token=parts[parts.length-1];
+  }
+  if(!token){setScanNotice("err","Invalid QR content.","INVALID");return;}
+  try{
+    setScanNotice("ok","Processing scan…","WORKING");
+    const res=await jpost("/scan/"+encodeURIComponent(token)+"/auto",{});
+    beep();
+    applyScanResult(res);
+  }catch(err){
+    setScanNotice("err",err.message||"Scan failed.","ERROR");
+  }
+}
+async function initScanner(){
   if(scannerInitialized)return;
   scannerInitialized=true;
   const area=document.getElementById("qr-reader");
   if(!area)return;
-
-  const input=document.createElement("input");
-  input.type="file";
-  input.accept="image/*";
-  input.capture="environment"; // mobile devices open camera
-  input.style.display="none";
-  document.body.appendChild(input);
-
-  area.onclick=()=>{input.click();};
-
-  input.onchange=()=>{
-    const file=input.files[0];
-    if(!file)return;
-    setScanNotice("ok","Uploading photo and decoding QR…","WORKING");
-    const reader=new FileReader();
-    reader.onload=async()=>{
-      try{
-        const dataUrl=reader.result;
-        const res=await jpost("/scan/upload",{imageData:dataUrl});
-        beep();
-        applyScanResult(res);
-      }catch(err){
-        setScanNotice("err",err.message||"Scan failed.","ERROR");
-      }finally{
-        input.value="";
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    setScanNotice("err","Camera not supported in this browser.","UNSUPPORTED");
+    area.innerHTML="<span class='muted'>Camera not supported. Use manual phone input or your phone camera app.</span>";
+    return;
+  }
+  if(!("BarcodeDetector" in window)){
+    setScanNotice("err","QR scanning not supported. Use phone camera app or manual input.","UNSUPPORTED");
+    area.innerHTML="<span class='muted'>Your browser does not support in-page QR scanning. Use your phone's normal camera app to scan the QR codes (they open /scan/&lt;token&gt;) or mark by phone number.</span>";
+    return;
+  }
+  scannerDetector=new BarcodeDetector({formats:["qr_code"]});
+  const video=document.createElement("video");
+  video.playsInline=true;video.muted=true;video.autoplay=true;
+  video.style.width="100%";video.style.height="100%";video.style.objectFit="cover";
+  area.innerHTML="";area.appendChild(video);
+  try{
+    scannerStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
+    video.srcObject=scannerStream;
+  }catch(err){
+    console.error(err);
+    setScanNotice("err","Camera permission denied or unavailable.","ERROR");
+    area.innerHTML="<span class='muted'>Unable to access camera. Check browser permission or use your phone camera app.</span>";
+    return;
+  }
+  const scanLoop=async()=>{
+    if(!video.srcObject){return;}
+    if(video.readyState!==HTMLMediaElement.HAVE_ENOUGH_DATA){
+      requestAnimationFrame(scanLoop);return;
+    }
+    try{
+      const codes=await scannerDetector.detect(video);
+      if(codes && codes.length){
+        const raw=codes[0].rawValue || "";
+        if(raw) handleScannedText(raw);
       }
-    };
-    reader.readAsDataURL(file);
+    }catch(e){}
+    requestAnimationFrame(scanLoop);
   };
-
-  setScanNotice("ok","Tap the box, take a photo of the QR, and wait a second.","READY");
+  setScanNotice("ok","Camera active. Point at a QR.","READY");
+  requestAnimationFrame(scanLoop);
 }
-
 scanPayBtn.onclick=()=>{if(!lastScan||lastScan.is_free)return;openPayModal({student_id:lastScan.student_id,class_id:lastScan.class_id,name:lastScan.name,month:lastScan.month});};
 
 // manual attendance
@@ -756,7 +782,7 @@ exportGradeBtn.onclick=()=>{
   exportGradeInfo.textContent=g?("Downloading "+g+" list…"):"Downloading all students…";
 };
 
-// periodic refresh for stats/unpaid/finance
+// periodic refresh
 setInterval(()=>{if(activeTab==="students")loadStudents();if(activeTab==="unpaid")unpaidForm.dispatchEvent(new Event("submit"));if(activeTab==="finance")financeForm.dispatchEvent(new Event("submit"));},30000);
 
 // boot
@@ -765,14 +791,6 @@ setInterval(()=>{if(activeTab==="students")loadStudents();if(activeTab==="unpaid
 </body></html>`;
 
 // ---------- SHARED ATTENDANCE HELPER ----------
-function extractTokenFromText(text) {
-  if (!text) return null;
-  const str = String(text).trim();
-  const idx = str.lastIndexOf("/scan/");
-  if (idx !== -1) return str.slice(idx + "/scan/".length);
-  const parts = str.split("/");
-  return parts[parts.length - 1] || null;
-}
 function markAttendanceForToken(rawToken) {
   const token = (rawToken || "").trim();
   if (!token) {
@@ -799,26 +817,11 @@ function markAttendanceForToken(rawToken) {
   return { status: "ok", date: d, month: m, student: s, class_id: cls.id, paid: !!pay };
 }
 
-// ---------- QR IMAGE DECODING FOR UPLOAD ----------
-async function decodeQrFromImageBuffer(buf) {
-  const image = await Jimp.read(buf);
-  return await new Promise((resolve, reject) => {
-    const qr = new QrReader();
-    qr.callback = (err, value) => {
-      if (err) return reject(err);
-      if (!value || !value.result)
-        return reject(new Error("No QR code detected in image"));
-      resolve(value.result);
-    };
-    qr.decode(image.bitmap);
-  });
-}
-
 // ---------- ROUTES ----------
 app.get("/", (req, res) => res.type("html").send(FRONTEND));
 app.get("/healthz", (req, res) => res.json({ ok: true }));
 
-// Simple GET scan endpoint so phone camera app can scan QR and open link
+// Simple GET scan endpoint so phone camera app can open link
 app.get("/scan/:token", (req, res) => {
   try {
     const result = markAttendanceForToken(req.params.token);
@@ -837,24 +840,9 @@ p{margin:.15rem 0;font-size:.85rem;color:#9ca3af}</style></head>
 </div></body></html>`;
     res.type("html").send(html);
   } catch (e) {
-    res.status(e.status || 500).send(e.message || "Scan failed");
-  }
-});
-
-// QR decode from uploaded image (used by scanner tab on phone)
-app.post("/scan/upload", async (req, res) => {
-  try {
-    const { imageData } = req.body || {};
-    if (!imageData) return res.status(400).json({ error: "No image data" });
-    const base64 = imageData.split(",").pop();
-    const buffer = Buffer.from(base64, "base64");
-    const text = await decodeQrFromImageBuffer(buffer);
-    const token = extractTokenFromText(text);
-    const result = markAttendanceForToken(token);
-    res.json(result);
-  } catch (e) {
-    console.error(e);
-    res.status(400).json({ error: e.message || "Failed to decode QR" });
+    res
+      .status(e.status || 500)
+      .send(e.message || "Scan failed");
   }
 });
 
@@ -1101,7 +1089,7 @@ app.get("/students/qr/all", async (req, res) => {
   }
 });
 
-// scan via POST for in-app scanner (not used now, but kept for API completeness)
+// scan via POST for in-app scanner
 app.post("/scan/:token/auto", (req, res) => {
   try {
     const result = markAttendanceForToken(req.params.token);
