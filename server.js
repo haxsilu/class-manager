@@ -2,7 +2,7 @@
 // Class management / payments / attendance system – single file, Railway-ready
 // Run once:
 //   npm init -y
-//   npm install express better-sqlite3 qrcode
+//   npm install express better-sqlite3 qrcode jimp qrcode-reader
 //   node server.js
 
 const express = require("express");
@@ -11,6 +11,8 @@ const fs = require("fs");
 const crypto = require("crypto");
 const QRCode = require("qrcode");
 const Database = require("better-sqlite3");
+const Jimp = require("jimp");
+const QrReader = require("qrcode-reader");
 
 const PORT = process.env.PORT || 5050;
 const DB_FILE = path.join("/app/data", "class_manager.db");
@@ -75,7 +77,7 @@ function openDb() {
 }
 openDb();
 
-// common helpers
+// ---------- HELPERS ----------
 const genToken = () =>
   crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
 const todayStr = () => {
@@ -91,7 +93,7 @@ const monthStr = () => {
 const classByGradeStmt = () =>
   db.prepare("SELECT id,title,fee FROM classes WHERE title=?");
 
-// Pre-prepared statements for speed
+// Pre-prepared statements (fast)
 const stmts = {
   countStudents: () => db.prepare("SELECT COUNT(*) c FROM students"),
   countPayments: () => db.prepare("SELECT COUNT(*) c FROM payments"),
@@ -185,9 +187,10 @@ const stmts = {
 
 // ---------- EXPRESS ----------
 const app = express();
-app.use(express.json({ limit: "5mb" }));
+// JSON limit a bit bigger for QR image uploads
+app.use(express.json({ limit: "8mb" }));
 
-// ---------- FRONTEND ----------
+// ---------- FRONTEND (SPA) ----------
 const FRONTEND = `<!doctype html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Class Manager</title>
@@ -339,10 +342,10 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
 <section id="tab-scanner" class="tab-section">
   <div class="cards">
     <div class="card">
-      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Camera + built-in QR reader.</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
-      <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Open scanner to start.</div><div class="tag">READY</div></div>
-      <div id="qr-reader"><span class="muted">Switch to this tab on phone and allow camera to scan QR.</span></div>
-      <div class="muted">If camera doesn't open, check browser camera permission. On unsupported browsers, use your phone camera app or manual input.</div>
+      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Tap box → camera → upload QR.</div></div><span class="badge"><span class="badge-dot"></span>Phone</span></div>
+      <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Tap the box to scan a QR.</div><div class="tag">READY</div></div>
+      <div id="qr-reader"><span class="muted">Tap here on your phone. Camera opens, take a photo of the QR.</span></div>
+      <div class="muted">This works on almost any phone browser. If it fails, use the normal camera app to scan and open the link (it will auto mark attendance).</div>
 
       <form id="scanner-manual-form" style="margin-top:.75rem;">
         <div class="card-subtitle" style="margin-bottom:.35rem;">Manual attendance (phone → today)</div>
@@ -570,9 +573,9 @@ async function loadStudents(){
 }
 async function refreshStats(){try{const d=await jget("/api/finance?month="+encodeURIComponent(curMonth()));statRev.textContent=d.total||0;}catch(e){}}
 
-// ---- scanner using BarcodeDetector (no external QR library) ----
+// ---- scanner (phone-friendly: image capture upload) ----
 const scanNotice=document.getElementById("scan-notice"),scanLast=document.getElementById("scanner-last-details"),scanPayBtn=document.getElementById("scanner-payment-btn"),scanManualForm=document.getElementById("scanner-manual-form"),scanManualPhone=document.getElementById("scanner-manual-phone"),scanManualStatus=document.getElementById("scanner-manual-status");
-let scannerInitialized=false,scannerStream=null,scannerDetector=null,lastScanRaw=null;
+let scannerInitialized=false;
 
 function setScanNotice(type,msg,tag){
   if(!scanNotice)return;
@@ -619,74 +622,45 @@ function applyScanResult(res){
   maybeRefreshAttendance(res.student.grade,res.date);
   refreshFinanceUnpaidNow();
 }
-async function handleScannedText(text){
-  if(!text)return;
-  if(text===lastScanRaw)return;
-  lastScanRaw=text;
-  let token;
-  const idx=text.lastIndexOf("/scan/");
-  if(idx!==-1) token=text.slice(idx+6);
-  else {
-    const parts=text.split("/");
-    token=parts[parts.length-1];
-  }
-  if(!token){setScanNotice("err","Invalid QR content.","INVALID");return;}
-  try{
-    setScanNotice("ok","Processing scan…","WORKING");
-    const res=await jpost("/scan/"+encodeURIComponent(token)+"/auto",{});
-    beep();
-    applyScanResult(res);
-  }catch(err){
-    setScanNotice("err",err.message||"Scan failed.","ERROR");
-  }
-}
-async function initScanner(){
-  if(scannerInitialized){
-    return;
-  }
+
+function initScanner(){
+  if(scannerInitialized)return;
   scannerInitialized=true;
   const area=document.getElementById("qr-reader");
   if(!area)return;
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
-    setScanNotice("err","Camera not supported in this browser.","UNSUPPORTED");
-    area.innerHTML="<span class='muted'>Camera not supported. Use manual phone input.</span>";
-    return;
-  }
-  if(!("BarcodeDetector" in window)){
-    setScanNotice("err","QR scanning not supported on this browser. Use phone camera app or manual input.","UNSUPPORTED");
-    area.innerHTML="<span class='muted'>QR scanning not supported. Use manual phone input or scan with phone camera app (link opens /scan token).</span>";
-    return;
-  }
-  scannerDetector=new BarcodeDetector({formats:["qr_code"]});
-  const video=document.createElement("video");
-  video.playsInline=true;video.muted=true;video.autoplay=true;
-  video.style.width="100%";video.style.height="100%";video.style.objectFit="cover";
-  area.innerHTML="";area.appendChild(video);
-  try{
-    scannerStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
-    video.srcObject=scannerStream;
-  }catch(err){
-    console.error(err);
-    setScanNotice("err","Camera permission denied or unavailable.","ERROR");
-    area.innerHTML="<span class='muted'>Unable to access camera. Check browser permission.</span>";
-    return;
-  }
-  const scanLoop=async()=>{
-    if(!video.srcObject){return;}
-    if(video.readyState!==HTMLMediaElement.HAVE_ENOUGH_DATA){
-      requestAnimationFrame(scanLoop);return;
-    }
-    try{
-      const codes=await scannerDetector.detect(video);
-      if(codes && codes.length){
-        const raw=codes[0].rawValue || "";
-        if(raw) handleScannedText(raw);
+
+  const input=document.createElement("input");
+  input.type="file";
+  input.accept="image/*";
+  input.capture="environment"; // mobile devices open camera
+  input.style.display="none";
+  document.body.appendChild(input);
+
+  area.onclick=()=>{input.click();};
+
+  input.onchange=()=>{
+    const file=input.files[0];
+    if(!file)return;
+    setScanNotice("ok","Uploading photo and decoding QR…","WORKING");
+    const reader=new FileReader();
+    reader.onload=async()=>{
+      try{
+        const dataUrl=reader.result;
+        const res=await jpost("/scan/upload",{imageData:dataUrl});
+        beep();
+        applyScanResult(res);
+      }catch(err){
+        setScanNotice("err",err.message||"Scan failed.","ERROR");
+      }finally{
+        input.value="";
       }
-    }catch(e){}
-    requestAnimationFrame(scanLoop);
+    };
+    reader.readAsDataURL(file);
   };
-  requestAnimationFrame(scanLoop);
+
+  setScanNotice("ok","Tap the box, take a photo of the QR, and wait a second.","READY");
 }
+
 scanPayBtn.onclick=()=>{if(!lastScan||lastScan.is_free)return;openPayModal({student_id:lastScan.student_id,class_id:lastScan.class_id,name:lastScan.name,month:lastScan.month});};
 
 // manual attendance
@@ -791,6 +765,14 @@ setInterval(()=>{if(activeTab==="students")loadStudents();if(activeTab==="unpaid
 </body></html>`;
 
 // ---------- SHARED ATTENDANCE HELPER ----------
+function extractTokenFromText(text) {
+  if (!text) return null;
+  const str = String(text).trim();
+  const idx = str.lastIndexOf("/scan/");
+  if (idx !== -1) return str.slice(idx + "/scan/".length);
+  const parts = str.split("/");
+  return parts[parts.length - 1] || null;
+}
 function markAttendanceForToken(rawToken) {
   const token = (rawToken || "").trim();
   if (!token) {
@@ -817,11 +799,26 @@ function markAttendanceForToken(rawToken) {
   return { status: "ok", date: d, month: m, student: s, class_id: cls.id, paid: !!pay };
 }
 
+// ---------- QR IMAGE DECODING FOR UPLOAD ----------
+async function decodeQrFromImageBuffer(buf) {
+  const image = await Jimp.read(buf);
+  return await new Promise((resolve, reject) => {
+    const qr = new QrReader();
+    qr.callback = (err, value) => {
+      if (err) return reject(err);
+      if (!value || !value.result)
+        return reject(new Error("No QR code detected in image"));
+      resolve(value.result);
+    };
+    qr.decode(image.bitmap);
+  });
+}
+
 // ---------- ROUTES ----------
 app.get("/", (req, res) => res.type("html").send(FRONTEND));
 app.get("/healthz", (req, res) => res.json({ ok: true }));
 
-// Simple GET scan endpoint so phone camera app can open link
+// Simple GET scan endpoint so phone camera app can scan QR and open link
 app.get("/scan/:token", (req, res) => {
   try {
     const result = markAttendanceForToken(req.params.token);
@@ -840,9 +837,24 @@ p{margin:.15rem 0;font-size:.85rem;color:#9ca3af}</style></head>
 </div></body></html>`;
     res.type("html").send(html);
   } catch (e) {
-    res
-      .status(e.status || 500)
-      .send(e.message || "Scan failed");
+    res.status(e.status || 500).send(e.message || "Scan failed");
+  }
+});
+
+// QR decode from uploaded image (used by scanner tab on phone)
+app.post("/scan/upload", async (req, res) => {
+  try {
+    const { imageData } = req.body || {};
+    if (!imageData) return res.status(400).json({ error: "No image data" });
+    const base64 = imageData.split(",").pop();
+    const buffer = Buffer.from(base64, "base64");
+    const text = await decodeQrFromImageBuffer(buffer);
+    const token = extractTokenFromText(text);
+    const result = markAttendanceForToken(token);
+    res.json(result);
+  } catch (e) {
+    console.error(e);
+    res.status(400).json({ error: e.message || "Failed to decode QR" });
   }
 });
 
@@ -880,7 +892,7 @@ app.post("/admin/db/upload", (req, res) => {
   }
 });
 
-// CSV exports (all + per-grade via ?grade=)
+// CSV exports
 app.get("/admin/export/students.csv", (req, res) => {
   try {
     const grade = req.query.grade;
@@ -900,7 +912,9 @@ app.get("/admin/export/students.csv", (req, res) => {
     res.setHeader("Content-Type", "text/csv");
     res.setHeader(
       "Content-Disposition",
-      'attachment; filename="' + (grade ? grade.replace(/\s+/g, "_").toLowerCase() + "_students.csv" : "students.csv") + '"'
+      'attachment; filename="' +
+        (grade ? grade.replace(/\s+/g, "_").toLowerCase() + "_students.csv" : "students.csv") +
+        '"'
     );
     res.send(csv);
   } catch (e) {
@@ -1007,7 +1021,7 @@ app.delete("/api/students/:id", (req, res) => {
   }
 });
 
-// QR pages (modern card)
+// QR pages (modern minimal card)
 app.get("/students/:id/qr", (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -1087,7 +1101,7 @@ app.get("/students/qr/all", async (req, res) => {
   }
 });
 
-// scan via POST for in-app scanner
+// scan via POST for in-app scanner (not used now, but kept for API completeness)
 app.post("/scan/:token/auto", (req, res) => {
   try {
     const result = markAttendanceForToken(req.params.token);
