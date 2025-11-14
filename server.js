@@ -63,7 +63,9 @@ function openDb() {
   db.exec(SCHEMA_SQL);
   if (db.prepare("SELECT COUNT(*) c FROM classes").get().c === 0) {
     const ins = db.prepare("INSERT INTO classes(title,fee) VALUES(?,2000)");
-    const tx = db.transaction(() => ["Grade 6", "Grade 7", "Grade 8", "O/L"].forEach(t => ins.run(t)));
+    const tx = db.transaction(() =>
+      ["Grade 6", "Grade 7", "Grade 8", "O/L"].forEach((t) => ins.run(t))
+    );
     tx();
   }
 }
@@ -82,7 +84,8 @@ const monthStr = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
-const classByGrade = g => db.prepare("SELECT * FROM classes WHERE title=?").get(g || "");
+const classByGrade = (g) =>
+  db.prepare("SELECT * FROM classes WHERE title=?").get(g || "");
 
 // ---------- EXPRESS ----------
 const app = express();
@@ -367,9 +370,6 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
   </div>
 </div>
 
-<!-- QR library from reliable CDN (loaded synchronously before app script) -->
-<script src="https://unpkg.com/html5-qrcode@2.3.10/minified/html5-qrcode.min.js"></script>
-
 <script>
 // ---- generic helpers ----
 const jget=u=>fetch(u).then(r=>{if(!r.ok)throw new Error("Request failed");return r.json();});
@@ -435,12 +435,28 @@ async function loadStudents(){
 }
 async function refreshStats(){try{const d=await jget("/api/finance?month="+encodeURIComponent(curMonth()));statRev.textContent=d.total||0;}catch(e){}}
 
-// ---- scanner using html5-qrcode (external library already loaded) ----
+// ---- scanner using html5-qrcode (loaded dynamically from CDN) ----
 const scanNotice=document.getElementById("scan-notice"),scanLast=document.getElementById("scanner-last-details"),scanPayBtn=document.getElementById("scanner-payment-btn"),scanManualForm=document.getElementById("scanner-manual-form"),scanManualPhone=document.getElementById("scanner-manual-phone"),scanManualStatus=document.getElementById("scanner-manual-status");
-let qrInstance=null,scanBusy=false;
+let qrInstance=null,scanBusy=false,qrLibLoading=false,qrLibFailed=false;
 
-function setScanNotice(type,msg,tag){if(!scanNotice)return;scanNotice.classList.remove("ok","err");if(type==="ok")scanNotice.classList.add("ok");if(type==="err")scanNotice.classList.add("err");scanNotice.querySelector("div").innerHTML="<strong>"+msg+"</strong>";if(tag)scanNotice.querySelector(".tag").textContent=tag.toUpperCase();}
-function beep(){try{const ctx=new (window.AudioContext||window.webkitAudioContext)(),o=ctx.createOscillator(),g=ctx.createGain();o.connect(g);g.connect(ctx.destination);o.frequency.value=880;g.gain.setValueAtTime(.0001,ctx.currentTime);g.gain.exponentialRampToValueAtTime(.4,ctx.currentTime+.01);g.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+.18);o.start();o.stop(ctx.currentTime+.2);}catch(e){}}
+function setScanNotice(type,msg,tag){
+  if(!scanNotice)return;
+  scanNotice.classList.remove("ok","err");
+  if(type==="ok")scanNotice.classList.add("ok");
+  if(type==="err")scanNotice.classList.add("err");
+  scanNotice.querySelector("div").innerHTML="<strong>"+msg+"</strong>";
+  if(tag)scanNotice.querySelector(".tag").textContent=tag.toUpperCase();
+}
+function beep(){
+  try{
+    const ctx=new (window.AudioContext||window.webkitAudioContext)(),o=ctx.createOscillator(),g=ctx.createGain();
+    o.connect(g);g.connect(ctx.destination);o.frequency.value=880;
+    g.gain.setValueAtTime(.0001,ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(.4,ctx.currentTime+.01);
+    g.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+.18);
+    o.start();o.stop(ctx.currentTime+.2);
+  }catch(e){}
+}
 function updateLastView(res){
   const s=res.student,lab=s.is_free?"FREE CARD":(res.paid?"PAID":"UNPAID"),cls=s.is_free?"tag-free":(res.paid?"tag-paid":"tag-unpaid");
   scanLast.innerHTML="<div class='pill pill-quiet'>Name: <strong>"+s.name+"</strong></div>"+
@@ -461,7 +477,10 @@ function refreshFinanceUnpaidNow(){
 }
 async function handleScan(decoded){
   let token=(decoded||"").trim();
-  try{const i=token.lastIndexOf("/scan/");if(i!==-1)token=token.slice(i+"/scan/".length);else token=token.split("/").pop();}catch(e){}
+  try{
+    const i=token.lastIndexOf("/scan/");
+    if(i!==-1)token=token.slice(i+"/scan/".length);else token=token.split("/").pop();
+  }catch(e){}
   if(!token){setScanNotice("err","Invalid QR.","ERROR");return;}
   setScanNotice("ok","Processing scan…","WORKING");
   try{
@@ -481,31 +500,66 @@ function handleScanThrottle(text){
   handleScan(text).finally(()=>setTimeout(()=>{scanBusy=false;},900));
 }
 
-function initScanner(){
+function loadQrLib(){
+  if(qrLibLoading || typeof Html5Qrcode!=="undefined")return;
+  qrLibLoading=true;
+  const primary="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.10/minified/html5-qrcode.min.js";
+  const backup="https://unpkg.com/html5-qrcode@2.3.10/minified/html5-qrcode.min.js";
+  const s1=document.createElement("script");
+  s1.src=primary;s1.async=true;
+  s1.onload=()=>{qrLibLoading=false;};
+  s1.onerror=()=>{
+    const s2=document.createElement("script");
+    s2.src=backup;s2.async=true;
+    s2.onload=()=>{qrLibLoading=false;};
+    s2.onerror=()=>{qrLibLoading=false;qrLibFailed=true;};
+    document.head.appendChild(s2);
+  };
+  document.head.appendChild(s1);
+}
+
+function startScanner(){
   const container=document.getElementById("qr-reader");
   if(!container)return;
-  if(qrInstance)return; // already running
-
-  if(typeof Html5Qrcode==="undefined"){
-    setScanNotice("err","QR library not loaded. Check your connection.","ERROR");
-    container.innerHTML='<span class="muted">QR script failed to load. Make sure internet / ad-block allows unpkg.com.</span>';
-    return;
-  }
-
   try{
     qrInstance=new Html5Qrcode("qr-reader");
-    setScanNotice("ok","Starting camera…","LOADING");
+    setScanNotice("ok","Starting camera…","CAMERA");
     qrInstance.start(
       {facingMode:"environment"},
       {fps:10,qrbox:{width:250,height:250}},
       text=>handleScanThrottle(text),
-      () => {}
+      ()=>{}
     ).then(()=>setScanNotice("ok","Scanner ready. Point a QR.","READY"))
      .catch(err=>{console.error(err);setScanNotice("err","Camera start failed: "+(err.message||err),"ERROR");});
   }catch(e){
     console.error(e);
     setScanNotice("err","Failed to initialize scanner: "+(e.message||e),"ERROR");
   }
+}
+
+function initScanner(){
+  const container=document.getElementById("qr-reader");
+  if(!container)return;
+  if(qrInstance)return;
+  loadQrLib();
+  let attempts=0;
+  const waitForLib=()=>{
+    if(typeof Html5Qrcode!=="undefined"){startScanner();return;}
+    if(qrLibFailed){
+      setScanNotice("err","QR library failed to load in this page. Check internet / ad blocker.","ERROR");
+      container.innerHTML='<span class="muted">QR engine could not be loaded. Make sure jsdelivr.net and unpkg.com are allowed.</span>';
+      return;
+    }
+    if(attempts++>20){
+      setScanNotice("err","QR library failed to load in this page. Check internet / ad blocker.","ERROR");
+      container.innerHTML='<span class="muted">QR engine could not be loaded. Make sure jsdelivr.net and unpkg.com are allowed.</span>';
+      return;
+    }
+    setScanNotice("ok","Loading QR engine…","LOADING");
+    container.innerHTML='<span class="muted">Loading QR engine…</span>';
+    setTimeout(waitForLib,500);
+  };
+  waitForLib();
 }
 
 function stopScanner(){
@@ -607,6 +661,9 @@ dbUploadBtn.onclick=async()=>{
   }catch(err){dbUploadStatus.textContent=err.message||"Upload failed.";}
 };
 
+// preload QR library early
+loadQrLib();
+
 // periodic refresh for stats/unpaid/finance
 setInterval(()=>{if(activeTab==="students")loadStudents();if(activeTab==="unpaid")unpaidForm.dispatchEvent(new Event("submit"));if(activeTab==="finance")financeForm.dispatchEvent(new Event("submit"));},30000);
 
@@ -653,7 +710,9 @@ app.post("/admin/db/upload", (req, res) => {
 // CSV exports
 app.get("/admin/export/students.csv", (req, res) => {
   try {
-    const rows = db.prepare("SELECT id,name,phone,grade,is_free,qr_token FROM students ORDER BY id").all();
+    const rows = db
+      .prepare("SELECT id,name,phone,grade,is_free,qr_token FROM students ORDER BY id")
+      .all();
     let csv = "id,name,phone,grade,is_free,qr_token\n";
     for (const r of rows) {
       csv += [
@@ -675,14 +734,18 @@ app.get("/admin/export/students.csv", (req, res) => {
 });
 app.get("/admin/export/payments.csv", (req, res) => {
   try {
-    const rows = db.prepare(`
+    const rows = db
+      .prepare(
+        `
       SELECT p.id,p.student_id,s.name student_name,s.phone,s.grade,
              p.class_id,c.title class_title,p.month,p.amount,p.method,p.created_at
       FROM payments p
       JOIN students s ON s.id=p.student_id
       JOIN classes c ON c.id=p.class_id
       ORDER BY p.month DESC,c.id,s.name
-    `).all();
+    `
+      )
+      .all();
     let csv = "id,student_id,student_name,phone,grade,class_id,class_title,month,amount,method,created_at\n";
     for (const r of rows) {
       csv += [
@@ -711,7 +774,9 @@ app.get("/admin/export/payments.csv", (req, res) => {
 // classes
 app.get("/api/classes", (req, res) => {
   try {
-    res.json({ classes: db.prepare("SELECT id,title,fee FROM classes ORDER BY id").all() });
+    res.json({
+      classes: db.prepare("SELECT id,title,fee FROM classes ORDER BY id").all()
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed" });
@@ -734,7 +799,8 @@ app.get("/api/students", (req, res) => {
 app.post("/api/students", (req, res) => {
   try {
     const { name, phone, grade, is_free } = req.body || {};
-    if (!name || !grade) return res.status(400).json({ error: "Name and grade required" });
+    if (!name || !grade)
+      return res.status(400).json({ error: "Name and grade required" });
     const token = genToken();
     const info = db
       .prepare(
@@ -757,7 +823,8 @@ app.put("/api/students/:id", (req, res) => {
     const ex = db.prepare("SELECT * FROM students WHERE id=?").get(id);
     if (!ex) return res.status(404).json({ error: "Not found" });
     const { name, phone, grade, is_free } = req.body || {};
-    if (!name || !grade) return res.status(400).json({ error: "Name and grade required" });
+    if (!name || !grade)
+      return res.status(400).json({ error: "Name and grade required" });
     db.prepare("UPDATE students SET name=?,phone=?,grade=?,is_free=? WHERE id=?").run(
       name.trim(),
       (phone || "").trim(),
@@ -791,7 +858,9 @@ app.get("/students/:id/qr", (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).send("Invalid");
-    let s = db.prepare("SELECT id,name,grade,qr_token FROM students WHERE id=?").get(id);
+    let s = db
+      .prepare("SELECT id,name,grade,qr_token FROM students WHERE id=?")
+      .get(id);
     if (!s) return res.status(404).send("Not found");
     let token = s.qr_token || genToken();
     if (!s.qr_token) {
@@ -837,7 +906,8 @@ app.get("/students/qr/all", async (req, res) => {
     const cards = [];
     for (const s of students) {
       let token = s.qr_token || genToken();
-      if (!s.qr_token) db.prepare("UPDATE students SET qr_token=? WHERE id=?").run(token, s.id);
+      if (!s.qr_token)
+        db.prepare("UPDATE students SET qr_token=? WHERE id=?").run(token, s.id);
       const qrText = `${host}/scan/${token}`;
       const url = await QRCode.toDataURL(qrText, { margin: 1, scale: 5 });
       cards.push(
@@ -855,7 +925,9 @@ app.get("/students/qr/all", async (req, res) => {
 .qr img{width:190px;height:190px;background:#fff;border-radius:10px}
 .brand{margin-top:4px;font-size:.75rem;color:#38bdf8;font-weight:600;letter-spacing:.08em;text-transform:uppercase}
 @media print{body{margin:0}}</style></head>
-<body><div class="grid">${cards.join("")}</div><script>window.onload=function(){window.print();}</script></body></html>`;
+<body><div class="grid">${cards.join(
+      ""
+    )}</div><script>window.onload=function(){window.print();}</script></body></html>`;
     res.type("html").send(html);
   } catch (e) {
     console.error(e);
@@ -934,7 +1006,14 @@ app.post("/api/attendance/manual-today-by-phone", (req, res) => {
     const pay = db
       .prepare("SELECT id FROM payments WHERE student_id=? AND class_id=? AND month=?")
       .get(s.id, cls.id, m);
-    res.json({ success: true, student: s, class_id: cls.id, date: d, month: m, paid: !!pay });
+    res.json({
+      success: true,
+      student: s,
+      class_id: cls.id,
+      date: d,
+      month: m,
+      paid: !!pay
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed" });
