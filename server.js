@@ -1,5 +1,9 @@
 // server.js
 // Class management / payments / attendance system – single file, Railway-ready
+// Run once:
+//   npm init -y
+//   npm install express better-sqlite3 qrcode jimp qrcode-reader
+//   node server.js
 
 const express = require("express");
 const path = require("path");
@@ -7,6 +11,8 @@ const fs = require("fs");
 const crypto = require("crypto");
 const QRCode = require("qrcode");
 const Database = require("better-sqlite3");
+const Jimp = require("jimp");
+const QrReader = require("qrcode-reader");
 
 const PORT = process.env.PORT || 5050;
 const DB_FILE = path.join("/app/data", "class_manager.db");
@@ -71,9 +77,9 @@ function openDb() {
 }
 openDb();
 
+// common helpers
 const genToken = () =>
   crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
-
 const todayStr = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
@@ -84,8 +90,100 @@ const monthStr = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
-const classByGrade = (g) =>
-  db.prepare("SELECT * FROM classes WHERE title=?").get(g || "");
+const classByGradeStmt = () =>
+  db.prepare("SELECT id,title,fee FROM classes WHERE title=?");
+
+// Pre-prepared frequently used statements for speed
+const stmts = {
+  countStudents: () => db.prepare("SELECT COUNT(*) c FROM students"),
+  countPayments: () => db.prepare("SELECT COUNT(*) c FROM payments"),
+  countAttendance: () => db.prepare("SELECT COUNT(*) c FROM attendance"),
+  listClasses: () => db.prepare("SELECT id,title,fee FROM classes ORDER BY id"),
+  listStudents: () =>
+    db.prepare("SELECT id,name,phone,grade,is_free,qr_token FROM students ORDER BY name"),
+  insertStudent: () =>
+    db.prepare(
+      "INSERT INTO students(name,phone,grade,qr_token,is_free) VALUES(?,?,?,?,?)"
+    ),
+  selectStudentById: () =>
+    db.prepare(
+      "SELECT id,name,phone,grade,qr_token,is_free FROM students WHERE id=?"
+    ),
+  selectStudentForScan: () =>
+    db.prepare(
+      "SELECT id,name,phone,grade,is_free FROM students WHERE qr_token=?"
+    ),
+  selectStudentByPhone: () =>
+    db.prepare(
+      "SELECT id,name,phone,grade,is_free FROM students WHERE phone=?"
+    ),
+  updateStudent: () =>
+    db.prepare(
+      "UPDATE students SET name=?,phone=?,grade=?,is_free=? WHERE id=?"
+    ),
+  deleteStudent: () => db.prepare("DELETE FROM students WHERE id=?"),
+  attendanceUpsert: () =>
+    db.prepare(
+      "INSERT INTO attendance(student_id,class_id,date,present) VALUES(?,?,?,1) " +
+        "ON CONFLICT(student_id,class_id,date) DO UPDATE SET present=1"
+    ),
+  paymentSelectMonth: () =>
+    db.prepare(
+      "SELECT id FROM payments WHERE student_id=? AND class_id=? AND month=?"
+    ),
+  paymentUpsert: () =>
+    db.prepare(
+      "INSERT INTO payments(student_id,class_id,month,amount,method) VALUES(?,?,?,?,?) " +
+        "ON CONFLICT(student_id,class_id,month) DO UPDATE " +
+        "SET amount=excluded.amount,method=excluded.method,created_at=datetime('now')"
+    ),
+  unpaidBase: () =>
+    db.prepare(
+      "SELECT s.id student_id,s.name,s.phone,s.grade,c.id class_id,c.title class_title " +
+        "FROM students s JOIN classes c ON c.title=s.grade " +
+        "WHERE s.is_free=0 AND NOT EXISTS (" +
+        "SELECT 1 FROM payments p WHERE p.student_id=s.id AND p.class_id=c.id AND p.month=? " +
+        ") ORDER BY c.id,s.name"
+    ),
+  financeMonth: () =>
+    db.prepare(
+      "SELECT c.id class_id,c.title class_title," +
+        "COUNT(p.id) payments,COALESCE(SUM(p.amount),0) total " +
+        "FROM classes c LEFT JOIN payments p ON p.class_id=c.id AND p.month=? " +
+        "GROUP BY c.id,c.title ORDER BY c.id"
+    ),
+  attendanceList: () =>
+    db.prepare(
+      "SELECT s.id student_id,s.name,s.phone,s.is_free," +
+        "CASE WHEN a.id IS NULL THEN 0 ELSE a.present END present " +
+        "FROM students s JOIN classes c ON c.title=s.grade " +
+        "LEFT JOIN attendance a ON a.student_id=s.id AND a.class_id=c.id AND a.date=? " +
+        "WHERE c.id=? ORDER BY s.name"
+    ),
+  dbInfo: () => ({
+    students: stmts.countStudents().get().c,
+    payments: stmts.countPayments().get().c,
+    attendance: stmts.countAttendance().get().c
+  }),
+  studentsCsvAll: () =>
+    db.prepare(
+      "SELECT id,name,phone,grade,is_free,qr_token FROM students ORDER BY grade,name"
+    ),
+  studentsCsvByGrade: () =>
+    db.prepare(
+      "SELECT id,name,phone,grade,is_free,qr_token FROM students WHERE grade=? ORDER BY name"
+    ),
+  paymentsCsv: () =>
+    db.prepare(
+      "SELECT p.id,p.student_id,s.name student_name,s.phone,s.grade," +
+        "p.class_id,c.title class_title,p.month,p.amount,p.method,p.created_at " +
+        "FROM payments p JOIN students s ON s.id=p.student_id " +
+        "JOIN classes c ON c.id=p.class_id " +
+        "ORDER BY p.month DESC,c.id,s.name"
+    ),
+  allStudentsForQr: () =>
+    db.prepare("SELECT id,name,grade,qr_token FROM students ORDER BY grade,name")
+};
 
 // ---------- EXPRESS ----------
 const app = express();
@@ -113,7 +211,7 @@ main{flex:1;max-width:1180px;margin:1rem auto 1.5rem;padding:0 1rem;width:100%;}
 @media(max-width:900px){.cards{grid-template-columns:minmax(0,1fr);}}
 .card{position:relative;padding:1rem;border-radius:1rem;background:rgba(15,23,42,.97);border:1px solid rgba(15,23,42,1);box-shadow:0 14px 30px rgba(0,0,0,.7),inset 0 0 0 1px rgba(148,163,184,.1);overflow:hidden;}
 .card::before{content:"";position:absolute;inset:-40%;background:radial-gradient(circle at top left,rgba(59,130,246,.12),transparent 55%),radial-gradient(circle at bottom right,rgba(30,64,175,.16),transparent 55%);opacity:.9;pointer-events:none;z-index:-1;}
-.card-header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:.55rem;gap:.5rem;}
+.card-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.55rem;gap:.5rem;}
 .card-title{font-size:.9rem;text-transform:uppercase;letter-spacing:.08em;color:var(--t-soft);}
 .card-subtitle{font-size:.75rem;color:var(--t-soft);}
 .badge{border-radius:999px;border:1px solid rgba(148,163,184,.4);padding:.1rem .5rem;font-size:.7rem;color:var(--t-soft);display:inline-flex;align-items:center;gap:.25rem;}
@@ -137,7 +235,7 @@ button:hover,.btn:hover{background:#2563eb;box-shadow:0 12px 28px rgba(37,99,235
 .notice.err{border-color:rgba(248,113,113,.75);color:#fecaca;}
 .tab-section{display:none;}
 .tab-section.active{display:block;}
-.table-container{border-radius:.8rem;border:1px solid var(--b);background:rgba(15,23,42,.97);overflow:hidden;overflow-x:auto;max-height:480px;}
+.table-container{border-radius:.8rem;border:1px solid var(--b);background:rgba(15,23,42,.97);overflow-x:auto;overflow-y:auto;max-height:480px;}
 table{width:100%;border-collapse:collapse;font-size:.78rem;min-width:540px;}
 thead{background:rgba(15,23,42,.96);position:sticky;top:0;z-index:5;}
 th,td{padding:.45rem .6rem;border-bottom:1px solid rgba(31,41,55,.96);white-space:nowrap;text-align:left;}
@@ -155,7 +253,8 @@ tbody tr:hover{background:rgba(30,64,175,.24);}
 .modal-backdrop.active{display:flex;}
 .modal{max-width:420px;width:100%;border-radius:1rem;background:#020617;border:1px solid var(--b);box-shadow:0 18px 42px rgba(0,0,0,.9);padding:1rem;}
 .modal h3{margin:0 0 .6rem;font-size:.95rem;}
-#qr-reader{width:100%;max-width:360px;border-radius:1rem;overflow:hidden;border:1px solid var(--b);margin-bottom:.7rem;background:#020617;min-height:220px;display:flex;align-items:center;justify-content:center;}
+#qr-reader{width:100%;max-width:360px;border-radius:1rem;overflow:hidden;border:1px solid var(--b);margin-bottom:.7rem;background:#020617;min-height:220px;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+#students-search{max-width:160px;}
 footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem 1rem;border-top:1px solid rgba(15,23,42,.96);background:radial-gradient(circle at top left,rgba(15,23,42,.95),rgba(2,6,23,.99));}
 @media(max-width:640px){.header-inner{flex-direction:column;align-items:stretch;}nav{justify-content:flex-start;}}
 </style>
@@ -216,8 +315,18 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
   </div>
   <div class="card">
     <div class="card-header">
-      <div><div class="card-title">All students</div><div class="card-subtitle">Edit / QR / delete.</div></div>
+      <div>
+        <div class="card-title">All students</div>
+        <div class="card-subtitle">Scroll / filter / paginate.</div>
+      </div>
       <div class="flex-row">
+        <select id="students-filter-grade" class="pill pill-quiet">
+          <option value="">All classes</option><option>Grade 6</option><option>Grade 7</option><option>Grade 8</option><option>O/L</option>
+        </select>
+        <input id="students-search" type="text" placeholder="Search name / phone">
+        <div class="pill pill-quiet" id="students-page-info">Page 1 / 1</div>
+        <button type="button" class="btn btn-outline btn-small" id="students-prev">Prev</button>
+        <button type="button" class="btn btn-outline btn-small" id="students-next">Next</button>
         <a href="/students/qr/all" target="_blank" class="btn btn-small">Print all QRs</a>
         <div class="pill pill-quiet" id="students-count-pill">0 students</div>
       </div>
@@ -232,10 +341,10 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
 <section id="tab-scanner" class="tab-section">
   <div class="cards">
     <div class="card">
-      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Phone camera + QR.</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
-      <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Open camera to begin.</div><div class="tag">READY</div></div>
-      <div id="qr-reader"><span class="muted">Camera view will appear here.</span></div>
-      <div class="muted">If camera doesn't start, check browser camera permission and internet connection.</div>
+      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Tap the box to open camera and scan.</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
+      <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Tap the box to scan a QR.</div><div class="tag">READY</div></div>
+      <div id="qr-reader"><span class="muted">Tap here to open camera and scan.</span></div>
+      <div class="muted">If camera doesn't open, check browser camera permission.</div>
 
       <form id="scanner-manual-form" style="margin-top:.75rem;">
         <div class="card-subtitle" style="margin-bottom:.35rem;">Manual attendance (phone → today)</div>
@@ -337,11 +446,18 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
     </div>
     <div class="card">
       <div class="card-header"><div><div class="card-title">Exports</div><div class="card-subtitle">CSV snapshots.</div></div></div>
-      <p class="muted">Download CSV exports for reporting.</p>
-      <div class="flex-row">
-        <a href="/admin/export/students.csv" class="btn btn-small">Students CSV</a>
+      <p class="muted">Download CSV exports for reporting or by grade.</p>
+      <div class="flex-row" style="margin-bottom:.5rem;">
+        <a href="/admin/export/students.csv" class="btn btn-small">All students CSV</a>
         <a href="/admin/export/payments.csv" class="btn btn-small">Payments CSV</a>
       </div>
+      <div class="flex-row">
+        <select id="export-grade" class="pill pill-quiet">
+          <option value="">All classes</option><option>Grade 6</option><option>Grade 7</option><option>Grade 8</option><option>O/L</option>
+        </select>
+        <button type="button" id="export-grade-btn" class="btn btn-outline btn-small">Download grade list</button>
+      </div>
+      <div class="muted" id="export-grade-info" style="margin-top:.35rem;"></div>
     </div>
   </div>
 </section>
@@ -385,13 +501,14 @@ document.querySelectorAll(".nav-btn").forEach(btn=>{
   btn.onclick=()=>{const t=btn.dataset.tab;if(t===activeTab)return;activeTab=t;
     document.querySelectorAll(".nav-btn").forEach(b=>b.classList.toggle("active",b===btn));
     document.querySelectorAll(".tab-section").forEach(s=>s.classList.toggle("active",s.id==="tab-"+t));
-    if(t==="scanner")initScanner();else stopScanner();
+    if(t==="scanner")initScanner();
   };
 });
 
 // ---- students ----
 const sf=document.getElementById("student-form"),sid=document.getElementById("student-id"),sname=document.getElementById("student-name"),sphone=document.getElementById("student-phone"),sgrade=document.getElementById("student-grade"),sfree=document.getElementById("student-free"),sstatus=document.getElementById("student-form-status"),sreset=document.getElementById("student-reset-btn"),ssubmit=document.getElementById("student-submit-btn"),tbodyStudents=document.getElementById("students-table-body"),studCount=document.getElementById("students-count-pill"),statTotal=document.getElementById("stat-total-students"),statFree=document.getElementById("stat-free-students"),statRev=document.getElementById("stat-month-revenue");
-let classesCache=[],lastScan=null;
+const studentsFilterGrade=document.getElementById("students-filter-grade"),studentsSearch=document.getElementById("students-search"),studentsPrev=document.getElementById("students-prev"),studentsNext=document.getElementById("students-next"),studentsPageInfo=document.getElementById("students-page-info");
+let classesCache=[],lastScan=null,studentsData=[],studentsPage=1,studentsPageSize=30;
 
 function resetStudent(){sid.value="";sname.value="";sphone.value="";sgrade.value="";sfree.checked=false;sstatus.textContent="";ssubmit.textContent="Add student";}
 sreset.onclick=resetStudent;
@@ -410,34 +527,56 @@ sf.onsubmit=async e=>{
 async function loadClasses(){try{classesCache=(await jget("/api/classes")).classes||[];}catch(e){}}
 const classIdFromGrade=g=>{const c=classesCache.find(c=>c.title===g);return c?c.id:null;};
 
+function renderStudentsTable(){
+  const grade=studentsFilterGrade.value,term=studentsSearch.value.trim().toLowerCase();
+  let filtered=studentsData;
+  if(grade)filtered=filtered.filter(s=>s.grade===grade);
+  if(term)filtered=filtered.filter(s=>(s.name||"").toLowerCase().includes(term)||(s.phone||"").toLowerCase().includes(term));
+  const total=filtered.length,totalPages=Math.max(1,Math.ceil(total/studentsPageSize));
+  if(studentsPage>totalPages)studentsPage=totalPages;
+  const start=(studentsPage-1)*studentsPageSize,end=start+studentsPageSize;
+  const pageRows=filtered.slice(start,end);
+  tbodyStudents.innerHTML="";
+  let free=0;
+  pageRows.forEach(s=>{
+    if(s.is_free)free++;
+    const tr=document.createElement("tr");
+    const tdName=document.createElement("td");tdName.textContent=s.name;
+    const tdPhone=document.createElement("td");tdPhone.textContent=s.phone||"-";
+    const tdGrade=document.createElement("td");tdGrade.textContent=s.grade;
+    const tdFree=document.createElement("td");tdFree.innerHTML=s.is_free?'<span class="tag tag-free">FREE</span>':"";
+    const tdQR=document.createElement("td");
+    const qr=document.createElement("a");qr.href="/students/"+s.id+"/qr";qr.target="_blank";qr.className="btn btn-outline btn-small";qr.textContent="QR";tdQR.appendChild(qr);
+    const tdAct=document.createElement("td");
+    const ebtn=document.createElement("button");ebtn.type="button";ebtn.className="btn btn-outline btn-small";ebtn.textContent="Edit";
+    ebtn.onclick=()=>{sid.value=s.id;sname.value=s.name;sphone.value=s.phone||"";sgrade.value=s.grade;sfree.checked=!!s.is_free;ssubmit.textContent="Save changes";sstatus.textContent="";};
+    const dbtn=document.createElement("button");dbtn.type="button";dbtn.className="btn btn-outline btn-small";dbtn.style.marginLeft=".25rem";dbtn.textContent="Delete";
+    dbtn.onclick=async()=>{if(!confirm("Delete this student and all their records?"))return;try{await jdel("/api/students/"+s.id);await loadStudents();await refreshStats();}catch(e){alert("Delete failed: "+(e.message||""));}};
+    tdAct.append(ebtn,dbtn);
+    tr.append(tdName,tdPhone,tdGrade,tdFree,tdQR,tdAct);tbodyStudents.appendChild(tr);
+  });
+  studentsPageInfo.textContent="Page "+studentsPage+" / "+totalPages;
+  const globalFree=studentsData.filter(s=>s.is_free).length;
+  const globalTotal=studentsData.length;
+  studCount.textContent=globalTotal+" student"+(globalTotal===1?"":"s");
+  statTotal.textContent=globalTotal;statFree.textContent=globalFree;
+}
+studentsPrev.onclick=()=>{if(studentsPage>1){studentsPage--;renderStudentsTable();}};
+studentsNext.onclick=()=>{studentsPage++;renderStudentsTable();};
+studentsFilterGrade.onchange=()=>{studentsPage=1;renderStudentsTable();};
+studentsSearch.oninput=()=>{studentsPage=1;renderStudentsTable();};
+
 async function loadStudents(){
   try{
-    const list=(await jget("/api/students")).students||[];tbodyStudents.innerHTML="";let free=0;
-    list.forEach(s=>{
-      if(s.is_free)free++;
-      const tr=document.createElement("tr");
-      const tdName=document.createElement("td");tdName.textContent=s.name;
-      const tdPhone=document.createElement("td");tdPhone.textContent=s.phone||"-";
-      const tdGrade=document.createElement("td");tdGrade.textContent=s.grade;
-      const tdFree=document.createElement("td");tdFree.innerHTML=s.is_free?'<span class="tag tag-free">FREE</span>':"";
-      const tdQR=document.createElement("td");
-      const qr=document.createElement("a");qr.href="/students/"+s.id+"/qr";qr.target="_blank";qr.className="btn btn-outline btn-small";qr.textContent="QR";tdQR.appendChild(qr);
-      const tdAct=document.createElement("td");
-      const ebtn=document.createElement("button");ebtn.type="button";ebtn.className="btn btn-outline btn-small";ebtn.textContent="Edit";
-      ebtn.onclick=()=>{sid.value=s.id;sname.value=s.name;sphone.value=s.phone||"";sgrade.value=s.grade;sfree.checked=!!s.is_free;ssubmit.textContent="Save changes";sstatus.textContent="";};
-      const dbtn=document.createElement("button");dbtn.type="button";dbtn.className="btn btn-outline btn-small";dbtn.style.marginLeft=".25rem";dbtn.textContent="Delete";
-      dbtn.onclick=async()=>{if(!confirm("Delete this student and all their records?"))return;try{await jdel("/api/students/"+s.id);await loadStudents();await refreshStats();}catch(e){alert("Delete failed: "+(e.message||""));}};
-      tdAct.append(ebtn,dbtn);
-      tr.append(tdName,tdPhone,tdGrade,tdFree,tdQR,tdAct);tbodyStudents.appendChild(tr);
-    });
-    const total=list.length;studCount.textContent=total+" student"+(total===1?"":"s");statTotal.textContent=total;statFree.textContent=free;
+    studentsData=(await jget("/api/students")).students||[];
+    studentsPage=1;renderStudentsTable();
   }catch(e){console.error(e);}
 }
 async function refreshStats(){try{const d=await jget("/api/finance?month="+encodeURIComponent(curMonth()));statRev.textContent=d.total||0;}catch(e){}}
 
-// ---- scanner using html5-qrcode (loaded dynamically from CDN) ----
+// ---- scanner (camera snapshot + backend QR decode) ----
 const scanNotice=document.getElementById("scan-notice"),scanLast=document.getElementById("scanner-last-details"),scanPayBtn=document.getElementById("scanner-payment-btn"),scanManualForm=document.getElementById("scanner-manual-form"),scanManualPhone=document.getElementById("scanner-manual-phone"),scanManualStatus=document.getElementById("scanner-manual-status");
-let qrInstance=null,scanBusy=false,qrLibLoading=false,qrLibFailed=false;
+let scannerInitialized=false;
 
 function setScanNotice(type,msg,tag){
   if(!scanNotice)return;
@@ -475,100 +614,48 @@ function refreshFinanceUnpaidNow(){
   if(unpaidMonth.value===m)unpaidForm.dispatchEvent(new Event("submit"));
   if(finMonth.value===m)financeForm.dispatchEvent(new Event("submit"));
 }
-async function handleScan(decoded){
-  let token=(decoded||"").trim();
-  try{
-    const i=token.lastIndexOf("/scan/");
-    if(i!==-1)token=token.slice(i+"/scan/".length);else token=token.split("/").pop();
-  }catch(e){}
-  if(!token){setScanNotice("err","Invalid QR.","ERROR");return;}
-  setScanNotice("ok","Processing scan…","WORKING");
-  try{
-    const res=await jpost("/scan/"+encodeURIComponent(token)+"/auto",{});
-    beep();
-    lastScan={student_id:res.student.id,class_id:res.class_id,name:res.student.name,grade:res.student.grade,is_free:res.student.is_free,paid:res.paid,month:res.month};
-    updateLastView(res);
-    const label=res.student.is_free?"FREE CARD":(res.paid?"PAID":"UNPAID");
-    setScanNotice("ok","Attendance recorded for "+res.student.name+".",label);
-    scanPayBtn.disabled=!!res.student.is_free;
-    maybeRefreshAttendance(res.student.grade,res.date);refreshFinanceUnpaidNow();
-  }catch(e){setScanNotice("err",e.message||"Scan failed.","ERROR");}
+function applyScanResult(res){
+  lastScan={student_id:res.student.id,class_id:res.class_id,name:res.student.name,grade:res.student.grade,is_free:res.student.is_free,paid:res.paid,month:res.month};
+  updateLastView(res);
+  const label=res.student.is_free?"FREE CARD":(res.paid?"PAID":"UNPAID");
+  setScanNotice("ok","Attendance recorded for "+res.student.name+".",label);
+  scanPayBtn.disabled=!!res.student.is_free;
+  maybeRefreshAttendance(res.student.grade,res.date);
+  refreshFinanceUnpaidNow();
 }
-function handleScanThrottle(text){
-  if(scanBusy)return;
-  scanBusy=true;
-  handleScan(text).finally(()=>setTimeout(()=>{scanBusy=false;},900));
-}
-
-function loadQrLib(){
-  if(qrLibLoading || typeof Html5Qrcode!=="undefined")return;
-  qrLibLoading=true;
-  const primary="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.10/minified/html5-qrcode.min.js";
-  const backup="https://unpkg.com/html5-qrcode@2.3.10/minified/html5-qrcode.min.js";
-  const s1=document.createElement("script");
-  s1.src=primary;s1.async=true;
-  s1.onload=()=>{qrLibLoading=false;};
-  s1.onerror=()=>{
-    const s2=document.createElement("script");
-    s2.src=backup;s2.async=true;
-    s2.onload=()=>{qrLibLoading=false;};
-    s2.onerror=()=>{qrLibLoading=false;qrLibFailed=true;};
-    document.head.appendChild(s2);
-  };
-  document.head.appendChild(s1);
-}
-
-function startScanner(){
-  const container=document.getElementById("qr-reader");
-  if(!container)return;
-  try{
-    qrInstance=new Html5Qrcode("qr-reader");
-    setScanNotice("ok","Starting camera…","CAMERA");
-    qrInstance.start(
-      {facingMode:"environment"},
-      {fps:10,qrbox:{width:250,height:250}},
-      text=>handleScanThrottle(text),
-      ()=>{}
-    ).then(()=>setScanNotice("ok","Scanner ready. Point a QR.","READY"))
-     .catch(err=>{console.error(err);setScanNotice("err","Camera start failed: "+(err.message||err),"ERROR");});
-  }catch(e){
-    console.error(e);
-    setScanNotice("err","Failed to initialize scanner: "+(e.message||e),"ERROR");
-  }
-}
-
 function initScanner(){
-  const container=document.getElementById("qr-reader");
-  if(!container)return;
-  if(qrInstance)return;
-  loadQrLib();
-  let attempts=0;
-  const waitForLib=()=>{
-    if(typeof Html5Qrcode!=="undefined"){startScanner();return;}
-    if(qrLibFailed){
-      setScanNotice("err","QR library failed to load in this page. Check internet / ad blocker.","ERROR");
-      container.innerHTML='<span class="muted">QR engine could not be loaded. Make sure jsdelivr.net and unpkg.com are allowed.</span>';
-      return;
-    }
-    if(attempts++>20){
-      setScanNotice("err","QR library failed to load in this page. Check internet / ad blocker.","ERROR");
-      container.innerHTML='<span class="muted">QR engine could not be loaded. Make sure jsdelivr.net and unpkg.com are allowed.</span>';
-      return;
-    }
-    setScanNotice("ok","Loading QR engine…","LOADING");
-    container.innerHTML='<span class="muted">Loading QR engine…</span>';
-    setTimeout(waitForLib,500);
-  };
-  waitForLib();
-}
+  if(scannerInitialized)return;
+  scannerInitialized=true;
+  const area=document.getElementById("qr-reader");
+  if(!area)return;
+  const input=document.createElement("input");
+  input.type="file";
+  input.accept="image/*";
+  input.capture="environment";
+  input.style.display="none";
+  document.body.appendChild(input);
+  area.onclick=()=>{input.click();};
+  area.querySelector("span").textContent="Tap here to open camera and scan.";
 
-function stopScanner(){
-  if(qrInstance){
-    const inst=qrInstance;qrInstance=null;
-    inst.stop().catch(()=>{}).finally(()=>{try{inst.clear();}catch(e){}});
-  }
-  const container=document.getElementById("qr-reader");
-  if(container)container.innerHTML='<span class="muted">Camera view will appear here.</span>';
+  input.onchange=()=>{
+    const file=input.files[0];
+    if(!file)return;
+    setScanNotice("ok","Decoding QR…","WORKING");
+    const reader=new FileReader();
+    reader.onload=async()=>{
+      try{
+        const dataUrl=reader.result;
+        const res=await jpost("/scan/upload",{imageData:dataUrl});
+        beep();
+        applyScanResult(res);
+      }catch(err){
+        setScanNotice("err",err.message||"Scan failed.","ERROR");
+      }finally{
+        input.value="";
+      }
+    };
+    reader.readAsDataURL(file);
+  };
 }
 
 scanPayBtn.onclick=()=>{if(!lastScan||lastScan.is_free)return;openPayModal({student_id:lastScan.student_id,class_id:lastScan.class_id,name:lastScan.name,month:lastScan.month});};
@@ -579,10 +666,7 @@ scanManualForm.onsubmit=async e=>{
   try{
     const res=await jpost("/api/attendance/manual-today-by-phone",{phone});
     beep();scanManualPhone.value="";scanManualStatus.textContent="Marked for today.";
-    lastScan={student_id:res.student.id,class_id:res.class_id,name:res.student.name,grade:res.student.grade,is_free:res.student.is_free,paid:res.paid,month:res.month};
-    updateLastView(res);const label=res.student.is_free?"FREE CARD":(res.paid?"PAID":"UNPAID");
-    setScanNotice("ok","Attendance recorded for "+res.student.name+" (manual).",label);
-    scanPayBtn.disabled=!!res.student.is_free;maybeRefreshAttendance(res.student.grade,res.date);refreshFinanceUnpaidNow();
+    applyScanResult(res);
   }catch(err){scanManualStatus.textContent=err.message||"Failed.";setScanNotice("err",err.message||"Manual mark failed.","ERROR");}
 };
 
@@ -649,8 +733,9 @@ payForm.onsubmit=async e=>{
   try{await jpost("/api/payments/record",p);payStatus.textContent="Payment saved.";await refreshStats();refreshFinanceUnpaidNow();}catch(err){payStatus.textContent=err.message||"Failed to save.";}
 };
 
-// ---- settings DB info + upload ----
+// ---- settings DB info + upload + grade export ----
 const dbInfoBtn=document.getElementById("db-info-btn"),dbInfoText=document.getElementById("db-info-text"),dbUploadFile=document.getElementById("db-upload-file"),dbUploadBtn=document.getElementById("db-upload-btn"),dbUploadStatus=document.getElementById("db-upload-status");
+const exportGradeSelect=document.getElementById("export-grade"),exportGradeBtn=document.getElementById("export-grade-btn"),exportGradeInfo=document.getElementById("export-grade-info");
 dbInfoBtn.onclick=async()=>{try{const i=await jget("/admin/db/info");dbInfoText.textContent="Size: "+i.size_kb+" KB · Students: "+i.students+" · Payments: "+i.payments+" · Attendance: "+i.attendance;}catch(err){dbInfoText.textContent=err.message||"Failed to load DB info.";}};
 dbUploadBtn.onclick=async()=>{
   const f=dbUploadFile.files[0];if(!f){dbUploadStatus.textContent="Choose a .db file first.";return;}
@@ -660,9 +745,12 @@ dbUploadBtn.onclick=async()=>{
     await jpost("/admin/db/upload",{data:base64});dbUploadStatus.textContent="Database uploaded. Refresh the page.";
   }catch(err){dbUploadStatus.textContent=err.message||"Upload failed.";}
 };
-
-// preload QR library early
-loadQrLib();
+exportGradeBtn.onclick=()=>{
+  const g=exportGradeSelect.value;
+  let url="/admin/export/students.csv";if(g)url+="?grade="+encodeURIComponent(g);
+  window.open(url,"_blank");
+  exportGradeInfo.textContent=g?("Downloading "+g+" list…"):"Downloading all students…";
+};
 
 // periodic refresh for stats/unpaid/finance
 setInterval(()=>{if(activeTab==="students")loadStudents();if(activeTab==="unpaid")unpaidForm.dispatchEvent(new Event("submit"));if(activeTab==="finance")financeForm.dispatchEvent(new Event("submit"));},30000);
@@ -671,6 +759,41 @@ setInterval(()=>{if(activeTab==="students")loadStudents();if(activeTab==="unpaid
 (async()=>{await loadClasses();await loadStudents();await refreshStats();unpaidForm.dispatchEvent(new Event("submit"));financeForm.dispatchEvent(new Event("submit"));})();
 </script>
 </body></html>`;
+
+// ---------- SHARED ATTENDANCE HELPER ----------
+function extractTokenFromText(text) {
+  if (!text) return null;
+  let t = String(text).trim();
+  const idx = t.lastIndexOf("/scan/");
+  if (idx !== -1) return t.slice(idx + "/scan/".length);
+  const parts = t.split("/");
+  return parts[parts.length - 1] || null;
+}
+function markAttendanceForToken(rawToken) {
+  const token = (rawToken || "").trim();
+  if (!token) {
+    const err = new Error("Invalid QR");
+    err.status = 400;
+    throw err;
+  }
+  const s = stmts.selectStudentForScan().get(token);
+  if (!s) {
+    const err = new Error("Student not found");
+    err.status = 404;
+    throw err;
+  }
+  const cls = classByGradeStmt().get(s.grade || "");
+  if (!cls) {
+    const err = new Error("Class not found");
+    err.status = 500;
+    throw err;
+  }
+  const d = todayStr();
+  const m = monthStr();
+  stmts.attendanceUpsert().run(s.id, cls.id, d);
+  const pay = stmts.paymentSelectMonth().get(s.id, cls.id, m);
+  return { status: "ok", date: d, month: m, student: s, class_id: cls.id, paid: !!pay };
+}
 
 // ---------- ROUTES ----------
 app.get("/", (req, res) => res.type("html").send(FRONTEND));
@@ -682,10 +805,13 @@ app.get("/admin/db/info", (req, res) => {
   try {
     const st = fs.statSync(DB_FILE);
     const size_kb = Math.round(st.size / 1024);
-    const students = db.prepare("SELECT COUNT(*) c FROM students").get().c;
-    const payments = db.prepare("SELECT COUNT(*) c FROM payments").get().c;
-    const attendance = db.prepare("SELECT COUNT(*) c FROM attendance").get().c;
-    res.json({ size_kb, students, payments, attendance });
+    const info = stmts.dbInfo();
+    res.json({
+      size_kb,
+      students: info.students,
+      payments: info.payments,
+      attendance: info.attendance
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to get DB info" });
@@ -707,12 +833,12 @@ app.post("/admin/db/upload", (req, res) => {
   }
 });
 
-// CSV exports
+// CSV exports (all + per-grade via ?grade=)
 app.get("/admin/export/students.csv", (req, res) => {
   try {
-    const rows = db
-      .prepare("SELECT id,name,phone,grade,is_free,qr_token FROM students ORDER BY id")
-      .all();
+    const grade = req.query.grade;
+    const stmt = grade ? stmts.studentsCsvByGrade() : stmts.studentsCsvAll();
+    const rows = grade ? stmt.all(grade) : stmt.all();
     let csv = "id,name,phone,grade,is_free,qr_token\n";
     for (const r of rows) {
       csv += [
@@ -725,7 +851,10 @@ app.get("/admin/export/students.csv", (req, res) => {
       ].join(",") + "\n";
     }
     res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", 'attachment; filename="students.csv"');
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="' + (grade ? grade.replace(/\s+/g, "_").toLowerCase() + "_students.csv" : "students.csv") + '"'
+    );
     res.send(csv);
   } catch (e) {
     console.error(e);
@@ -734,19 +863,9 @@ app.get("/admin/export/students.csv", (req, res) => {
 });
 app.get("/admin/export/payments.csv", (req, res) => {
   try {
-    const rows = db
-      .prepare(
-        `
-      SELECT p.id,p.student_id,s.name student_name,s.phone,s.grade,
-             p.class_id,c.title class_title,p.month,p.amount,p.method,p.created_at
-      FROM payments p
-      JOIN students s ON s.id=p.student_id
-      JOIN classes c ON c.id=p.class_id
-      ORDER BY p.month DESC,c.id,s.name
-    `
-      )
-      .all();
-    let csv = "id,student_id,student_name,phone,grade,class_id,class_title,month,amount,method,created_at\n";
+    const rows = stmts.paymentsCsv().all();
+    let csv =
+      "id,student_id,student_name,phone,grade,class_id,class_title,month,amount,method,created_at\n";
     for (const r of rows) {
       csv += [
         r.id,
@@ -775,7 +894,7 @@ app.get("/admin/export/payments.csv", (req, res) => {
 app.get("/api/classes", (req, res) => {
   try {
     res.json({
-      classes: db.prepare("SELECT id,title,fee FROM classes ORDER BY id").all()
+      classes: stmts.listClasses().all()
     });
   } catch (e) {
     console.error(e);
@@ -787,9 +906,7 @@ app.get("/api/classes", (req, res) => {
 app.get("/api/students", (req, res) => {
   try {
     res.json({
-      students: db
-        .prepare("SELECT id,name,phone,grade,is_free,qr_token FROM students ORDER BY name")
-        .all()
+      students: stmts.listStudents().all()
     });
   } catch (e) {
     console.error(e);
@@ -802,14 +919,10 @@ app.post("/api/students", (req, res) => {
     if (!name || !grade)
       return res.status(400).json({ error: "Name and grade required" });
     const token = genToken();
-    const info = db
-      .prepare(
-        "INSERT INTO students(name,phone,grade,qr_token,is_free) VALUES(?,?,?,?,?)"
-      )
+    const info = stmts
+      .insertStudent()
       .run(name.trim(), (phone || "").trim(), grade, token, is_free ? 1 : 0);
-    const s = db
-      .prepare("SELECT id,name,phone,grade,qr_token,is_free FROM students WHERE id=?")
-      .get(info.lastInsertRowid);
+    const s = stmts.selectStudentById().get(info.lastInsertRowid);
     res.json({ student: s });
   } catch (e) {
     console.error(e);
@@ -820,21 +933,15 @@ app.put("/api/students/:id", (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid id" });
-    const ex = db.prepare("SELECT * FROM students WHERE id=?").get(id);
+    const ex = stmts.selectStudentById().get(id);
     if (!ex) return res.status(404).json({ error: "Not found" });
     const { name, phone, grade, is_free } = req.body || {};
     if (!name || !grade)
       return res.status(400).json({ error: "Name and grade required" });
-    db.prepare("UPDATE students SET name=?,phone=?,grade=?,is_free=? WHERE id=?").run(
-      name.trim(),
-      (phone || "").trim(),
-      grade,
-      is_free ? 1 : 0,
-      id
-    );
-    const s = db
-      .prepare("SELECT id,name,phone,grade,qr_token,is_free FROM students WHERE id=?")
-      .get(id);
+    stmts
+      .updateStudent()
+      .run(name.trim(), (phone || "").trim(), grade, is_free ? 1 : 0, id);
+    const s = stmts.selectStudentById().get(id);
     res.json({ student: s });
   } catch (e) {
     console.error(e);
@@ -845,7 +952,7 @@ app.delete("/api/students/:id", (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: "Invalid id" });
-    db.prepare("DELETE FROM students WHERE id=?").run(id);
+    stmts.deleteStudent().run(id);
     res.json({ success: true });
   } catch (e) {
     console.error(e);
@@ -899,9 +1006,7 @@ app.get("/students/:id/qr", (req, res) => {
 // all QR cards printable
 app.get("/students/qr/all", async (req, res) => {
   try {
-    const students = db
-      .prepare("SELECT id,name,grade,qr_token FROM students ORDER BY grade,name")
-      .all();
+    const students = stmts.allStudentsForQr().all();
     const host = `${req.protocol}://${req.get("host")}`;
     const cards = [];
     for (const s of students) {
@@ -935,29 +1040,44 @@ app.get("/students/qr/all", async (req, res) => {
   }
 });
 
-// scan endpoint → mark attendance
+// scan by token (legacy)
 app.post("/scan/:token/auto", (req, res) => {
   try {
-    const token = req.params.token;
-    if (!token) return res.status(400).json({ error: "Missing token" });
-    const s = db
-      .prepare("SELECT id,name,phone,grade,is_free FROM students WHERE qr_token=?")
-      .get(token);
-    if (!s) return res.status(404).json({ error: "Student not found" });
-    const cls = classByGrade(s.grade);
-    if (!cls) return res.status(500).json({ error: "Class not found" });
-    const d = todayStr(),
-      m = monthStr();
-    db.prepare(
-      "INSERT INTO attendance(student_id,class_id,date,present) VALUES(?,?,?,1) ON CONFLICT(student_id,class_id,date) DO UPDATE SET present=1"
-    ).run(s.id, cls.id, d);
-    const pay = db
-      .prepare("SELECT id FROM payments WHERE student_id=? AND class_id=? AND month=?")
-      .get(s.id, cls.id, m);
-    res.json({ status: "ok", date: d, month: m, student: s, class_id: cls.id, paid: !!pay });
+    const result = markAttendanceForToken(req.params.token);
+    res.json(result);
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: "Failed" });
+    res.status(e.status || 500).json({ error: e.message || "Failed" });
+  }
+});
+
+// scan by uploaded image (scanner from scratch: backend decode)
+async function decodeQrFromImageBuffer(buf) {
+  const image = await Jimp.read(buf);
+  return await new Promise((resolve, reject) => {
+    const qr = new QrReader();
+    qr.callback = (err, value) => {
+      if (err) return reject(err);
+      if (!value || !value.result)
+        return reject(new Error("No QR code detected in image"));
+      resolve(value.result);
+    };
+    qr.decode(image.bitmap);
+  });
+}
+app.post("/scan/upload", async (req, res) => {
+  try {
+    const { imageData } = req.body || {};
+    if (!imageData) return res.status(400).json({ error: "No image data" });
+    const base64 = imageData.split(",").pop();
+    const buffer = Buffer.from(base64, "base64");
+    const text = await decodeQrFromImageBuffer(buffer);
+    const token = extractTokenFromText(text);
+    const result = markAttendanceForToken(token);
+    res.json(result);
+  } catch (e) {
+    console.error(e);
+    res.status(400).json({ error: e.message || "Failed to decode QR" });
   }
 });
 
@@ -968,18 +1088,7 @@ app.get("/api/attendance/list", (req, res) => {
       date = req.query.date;
     if (!class_id || !date)
       return res.status(400).json({ error: "class_id and date required" });
-    const rows = db
-      .prepare(
-        `
-      SELECT s.id student_id,s.name,s.phone,s.is_free,
-             CASE WHEN a.id IS NULL THEN 0 ELSE a.present END present
-      FROM students s
-      JOIN classes c ON c.title=s.grade
-      LEFT JOIN attendance a ON a.student_id=s.id AND a.class_id=c.id AND a.date=?
-      WHERE c.id=? ORDER BY s.name
-    `
-      )
-      .all(date, class_id);
+    const rows = stmts.attendanceList().all(date, class_id);
     res.json({ records: rows });
   } catch (e) {
     console.error(e);
@@ -992,20 +1101,15 @@ app.post("/api/attendance/manual-today-by-phone", (req, res) => {
   try {
     const { phone } = req.body || {};
     if (!phone) return res.status(400).json({ error: "phone required" });
-    const s = db
-      .prepare("SELECT id,name,phone,grade,is_free FROM students WHERE phone=?")
-      .get(String(phone).trim());
-    if (!s) return res.status(404).json({ error: "Student not found for this phone" });
-    const cls = classByGrade(s.grade);
+    const s = stmts.selectStudentByPhone().get(String(phone).trim());
+    if (!s)
+      return res.status(404).json({ error: "Student not found for this phone" });
+    const cls = classByGradeStmt().get(s.grade || "");
     if (!cls) return res.status(500).json({ error: "Class not found" });
-    const d = todayStr(),
-      m = monthStr();
-    db.prepare(
-      "INSERT INTO attendance(student_id,class_id,date,present) VALUES(?,?,?,1) ON CONFLICT(student_id,class_id,date) DO UPDATE SET present=1"
-    ).run(s.id, cls.id, d);
-    const pay = db
-      .prepare("SELECT id FROM payments WHERE student_id=? AND class_id=? AND month=?")
-      .get(s.id, cls.id, m);
+    const d = todayStr();
+    const m = monthStr();
+    stmts.attendanceUpsert().run(s.id, cls.id, d);
+    const pay = stmts.paymentSelectMonth().get(s.id, cls.id, m);
     res.json({
       success: true,
       student: s,
@@ -1026,13 +1130,7 @@ app.post("/api/payments/record", (req, res) => {
     const { student_id, class_id, month, amount, method } = req.body || {};
     if (!student_id || !class_id || !month || !amount || !method)
       return res.status(400).json({ error: "Missing fields" });
-    db.prepare(
-      `
-      INSERT INTO payments(student_id,class_id,month,amount,method)
-      VALUES(?,?,?,?,?)
-      ON CONFLICT(student_id,class_id,month) DO UPDATE SET amount=excluded.amount,method=excluded.method,created_at=datetime('now')
-    `
-    ).run(student_id, class_id, month, amount, method);
+    stmts.paymentUpsert().run(student_id, class_id, month, amount, method);
     res.json({ success: true });
   } catch (e) {
     console.error(e);
@@ -1046,21 +1144,17 @@ app.get("/api/unpaid", (req, res) => {
     const month = req.query.month,
       grade = req.query.grade;
     if (!month) return res.status(400).json({ error: "month required" });
-    let sql = `
-      SELECT s.id student_id,s.name,s.phone,s.grade,c.id class_id,c.title class_title
-      FROM students s
-      JOIN classes c ON c.title=s.grade
-      WHERE s.is_free=0
-        AND NOT EXISTS(
-          SELECT 1 FROM payments p WHERE p.student_id=s.id AND p.class_id=c.id AND p.month=?
-        )`;
-    const params = [month];
-    if (grade) {
-      sql += " AND s.grade=?";
-      params.push(grade);
+    if (!grade) {
+      res.json({ unpaid: stmts.unpaidBase().all(month) });
+    } else {
+      const sql =
+        "SELECT s.id student_id,s.name,s.phone,s.grade,c.id class_id,c.title class_title " +
+        "FROM students s JOIN classes c ON c.title=s.grade " +
+        "WHERE s.is_free=0 AND s.grade=? " +
+        "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.student_id=s.id AND p.class_id=c.id AND p.month=?) " +
+        "ORDER BY c.id,s.name";
+      res.json({ unpaid: db.prepare(sql).all(grade, month) });
     }
-    sql += " ORDER BY c.id,s.name";
-    res.json({ unpaid: db.prepare(sql).all(...params) });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed" });
@@ -1072,16 +1166,7 @@ app.get("/api/finance", (req, res) => {
   try {
     const month = req.query.month;
     if (!month) return res.status(400).json({ error: "month required" });
-    const rows = db
-      .prepare(
-        `
-      SELECT c.id class_id,c.title class_title,
-             COUNT(p.id) payments,COALESCE(SUM(p.amount),0) total
-      FROM classes c LEFT JOIN payments p ON p.class_id=c.id AND p.month=?
-      GROUP BY c.id,c.title ORDER BY c.id
-    `
-      )
-      .all(month);
+    const rows = stmts.financeMonth().all(month);
     const total = rows.reduce((s, r) => s + (r.total || 0), 0);
     res.json({ rows, total });
   } catch (e) {
