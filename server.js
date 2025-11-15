@@ -1,9 +1,10 @@
 // server.js
-// Class management / payments / attendance system – single file, Railway-ready
-// Install deps once:
+// Single-file Class Manager (students / QR attendance / payments / finance)
+// Optimized for Railway + mobile QR scanning
+//
+// Setup:
 //   npm init -y
 //   npm install express better-sqlite3 qrcode
-// Run:
 //   node server.js
 
 const express = require("express");
@@ -14,6 +15,8 @@ const QRCode = require("qrcode");
 const Database = require("better-sqlite3");
 
 const PORT = process.env.PORT || 5050;
+
+// Use a persistent folder (works well with Railway volumes)
 const DB_FILE = path.join("/app/data", "class_manager.db");
 
 // ---------- DB SETUP ----------
@@ -66,6 +69,8 @@ function openDb() {
   db = new Database(DB_FILE);
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA_SQL);
+
+  // Seed classes if empty
   if (db.prepare("SELECT COUNT(*) c FROM classes").get().c === 0) {
     const ins = db.prepare("INSERT INTO classes(title,fee) VALUES(?,2000)");
     const tx = db.transaction(() =>
@@ -79,20 +84,27 @@ openDb();
 // ---------- HELPERS ----------
 const genToken = () =>
   crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
+
 const todayStr = () => {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
+  return (
+    d.getFullYear() +
+    "-" +
+    String(d.getMonth() + 1).padStart(2, "0") +
+    "-" +
+    String(d.getDate()).padStart(2, "0")
+  );
 };
+
 const monthStr = () => {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
 };
+
 const classByGradeStmt = () =>
   db.prepare("SELECT id,title,fee FROM classes WHERE title=?");
 
-// Pre-prepared statements (fast)
+// Pre-prepared statements for speed
 const stmts = {
   countStudents: () => db.prepare("SELECT COUNT(*) c FROM students"),
   countPayments: () => db.prepare("SELECT COUNT(*) c FROM payments"),
@@ -188,7 +200,7 @@ const stmts = {
 const app = express();
 app.use(express.json({ limit: "5mb" }));
 
-// ---------- FRONTEND (SPA) ----------
+// ---------- FRONTEND (SPA with mobile-optimized QR scanning using jsQR) ----------
 const FRONTEND = `<!doctype html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Class Manager</title>
@@ -253,11 +265,13 @@ tbody tr:hover{background:rgba(30,64,175,.24);}
 .modal{max-width:420px;width:100%;border-radius:1rem;background:#020617;border:1px solid var(--b);box-shadow:0 18px 42px rgba(0,0,0,.9);padding:1rem;}
 .modal h3{margin:0 0 .6rem;font-size:.95rem;}
 #qr-reader{width:100%;max-width:360px;border-radius:1rem;overflow:hidden;border:1px solid var(--b);margin-bottom:.7rem;background:#020617;min-height:220px;display:flex;align-items:center;justify-content:center;}
+#qr-reader video{width:100%;height:100%;object-fit:cover;}
 #students-search{max-width:160px;}
 footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem 1rem;border-top:1px solid rgba(15,23,42,.96);background:radial-gradient(circle at top left,rgba(15,23,42,.95),rgba(2,6,23,.99));}
 @media(max-width:640px){.header-inner{flex-direction:column;align-items:stretch;}nav{justify-content:flex-start;}}
 </style>
-<script src="https://unpkg.com/html5-qrcode@2.3.10/html5-qrcode.min.js"></script>
+<!-- Pure JS QR decoder (works on mobile) -->
+<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
 </head><body>
 <header><div class="header-inner">
   <div class="logo"><div class="logo-pill"></div><span>Class Manager</span></div>
@@ -341,10 +355,10 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
 <section id="tab-scanner" class="tab-section">
   <div class="cards">
     <div class="card">
-      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Camera QR (phone-friendly).</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
+      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Mobile camera · QR · Payments</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
       <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Open scanner to start.</div><div class="tag">READY</div></div>
-      <div id="qr-reader"><span class="muted">When scanner starts, camera preview will appear here and scan QRs automatically.</span></div>
-      <div class="muted">If anything fails, use the normal camera app to scan a QR; it will open a link like <code>/scan/&lt;token&gt;</code> and attendance will be recorded automatically.</div>
+      <div id="qr-reader"><span class="muted">When you open this tab on your phone, camera preview will appear here and QRs will be scanned automatically.</span></div>
+      <div class="muted">If camera access is blocked by the browser, use your normal camera app to scan a QR. It opens a link like <code>/scan/&lt;token&gt;</code> and attendance is recorded automatically.</div>
 
       <form id="scanner-manual-form" style="margin-top:.75rem;">
         <div class="card-subtitle" style="margin-bottom:.35rem;">Manual attendance (phone → today)</div>
@@ -495,10 +509,21 @@ const jdel=u=>fetch(u,{method:"DELETE"}).then(async r=>{const d=await r.json().c
 const curMonth=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");};
 const today=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");};
 
-// ---- nav ----
+// ---- nav + scanner stop/start ----
 let activeTab="students";
+function stopScanner(){
+  try{
+    if(window._scanStream){window._scanStream.getTracks().forEach(t=>t.stop());}
+  }catch(e){}
+  window._scanStream=null;
+  window._scanVideo&& (window._scanVideo.srcObject=null);
+  window._scanRunning=false;
+}
 document.querySelectorAll(".nav-btn").forEach(btn=>{
-  btn.onclick=()=>{const t=btn.dataset.tab;if(t===activeTab)return;activeTab=t;
+  btn.onclick=()=>{
+    const t=btn.dataset.tab;if(t===activeTab)return;
+    if(activeTab==="scanner" && t!=="scanner") stopScanner();
+    activeTab=t;
     document.querySelectorAll(".nav-btn").forEach(b=>b.classList.toggle("active",b===btn));
     document.querySelectorAll(".tab-section").forEach(s=>s.classList.toggle("active",s.id==="tab-"+t));
     if(t==="scanner")initScanner();
@@ -506,8 +531,25 @@ document.querySelectorAll(".nav-btn").forEach(btn=>{
 });
 
 // ---- students ----
-const sf=document.getElementById("student-form"),sid=document.getElementById("student-id"),sname=document.getElementById("student-name"),sphone=document.getElementById("student-phone"),sgrade=document.getElementById("student-grade"),sfree=document.getElementById("student-free"),sstatus=document.getElementById("student-form-status"),sreset=document.getElementById("student-reset-btn"),ssubmit=document.getElementById("student-submit-btn"),tbodyStudents=document.getElementById("students-table-body"),studCount=document.getElementById("students-count-pill"),statTotal=document.getElementById("stat-total-students"),statFree=document.getElementById("stat-free-students"),statRev=document.getElementById("stat-month-revenue");
-const studentsFilterGrade=document.getElementById("students-filter-grade"),studentsSearch=document.getElementById("students-search"),studentsPrev=document.getElementById("students-prev"),studentsNext=document.getElementById("students-next"),studentsPageInfo=document.getElementById("students-page-info");
+const sf=document.getElementById("student-form"),
+      sid=document.getElementById("student-id"),
+      sname=document.getElementById("student-name"),
+      sphone=document.getElementById("student-phone"),
+      sgrade=document.getElementById("student-grade"),
+      sfree=document.getElementById("student-free"),
+      sstatus=document.getElementById("student-form-status"),
+      sreset=document.getElementById("student-reset-btn"),
+      ssubmit=document.getElementById("student-submit-btn"),
+      tbodyStudents=document.getElementById("students-table-body"),
+      studCount=document.getElementById("students-count-pill"),
+      statTotal=document.getElementById("stat-total-students"),
+      statFree=document.getElementById("stat-free-students"),
+      statRev=document.getElementById("stat-month-revenue");
+const studentsFilterGrade=document.getElementById("students-filter-grade"),
+      studentsSearch=document.getElementById("students-search"),
+      studentsPrev=document.getElementById("students-prev"),
+      studentsNext=document.getElementById("students-next"),
+      studentsPageInfo=document.getElementById("students-page-info");
 let classesCache=[],lastScan=null,studentsData=[],studentsPage=1,studentsPageSize=30;
 
 function resetStudent(){sid.value="";sname.value="";sphone.value="";sgrade.value="";sfree.checked=false;sstatus.textContent="";ssubmit.textContent="Add student";}
@@ -572,9 +614,14 @@ async function loadStudents(){
 }
 async function refreshStats(){try{const d=await jget("/api/finance?month="+encodeURIComponent(curMonth()));statRev.textContent=d.total||0;}catch(e){}}
 
-// ---- scanner using html5-qrcode (phone-friendly) ----
-const scanNotice=document.getElementById("scan-notice"),scanLast=document.getElementById("scanner-last-details"),scanPayBtn=document.getElementById("scanner-payment-btn"),scanManualForm=document.getElementById("scanner-manual-form"),scanManualPhone=document.getElementById("scanner-manual-phone"),scanManualStatus=document.getElementById("scanner-manual-status");
-let scannerInitialized=false,scannerInstance=null,lastScanRaw=null;
+// ---- scanner using getUserMedia + jsQR (mobile-optimized) ----
+const scanNotice=document.getElementById("scan-notice"),
+      scanLast=document.getElementById("scanner-last-details"),
+      scanPayBtn=document.getElementById("scanner-payment-btn"),
+      scanManualForm=document.getElementById("scanner-manual-form"),
+      scanManualPhone=document.getElementById("scanner-manual-phone"),
+      scanManualStatus=document.getElementById("scanner-manual-status"),
+      qrReaderDiv=document.getElementById("qr-reader");
 
 function setScanNotice(type,msg,tag){
   if(!scanNotice)return;
@@ -621,6 +668,7 @@ function applyScanResult(res){
   maybeRefreshAttendance(res.student.grade,res.date);
   refreshFinanceUnpaidNow();
 }
+let lastScanRaw=null;
 async function handleScannedText(text){
   if(!text)return;
   if(text===lastScanRaw)return;
@@ -642,43 +690,72 @@ async function handleScannedText(text){
     setScanNotice("err",err.message||"Scan failed.","ERROR");
   }
 }
+
 function initScanner(){
-  if(scannerInitialized)return;
-  scannerInitialized=true;
-  const area=document.getElementById("qr-reader");
-  if(!area)return;
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+  if(window._scanRunning)return;
+  if(!qrReaderDiv)return;
+
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
     setScanNotice("err","Camera not supported in this browser.","UNSUPPORTED");
-    area.innerHTML="<span class='muted'>Camera not supported. Use your phone camera app to scan the QR codes.</span>";
+    qrReaderDiv.innerHTML="<span class='muted'>Camera not supported. Use your phone camera app to scan the QR codes.</span>";
     return;
   }
-  if(!window.Html5Qrcode){
+  if(typeof window.jsQR!=="function"){
     setScanNotice("err","QR library failed to load in this page. Check internet / ad blocker.","LIB");
-    area.innerHTML="<span class='muted'>QR scanner script could not load. Check internet connection or ad blocker, or use your phone camera app.</span>";
+    qrReaderDiv.innerHTML="<span class='muted'>QR scanner script could not load. Check internet connection or ad blocker, or use the normal camera app.</span>";
     return;
   }
-  area.innerHTML="";
-  try{
-    scannerInstance=new Html5Qrcode("qr-reader");
-  }catch(e){
-    setScanNotice("err","Failed to initialize QR scanner.","ERROR");
-    area.innerHTML="<span class='muted'>Could not init QR scanner. Use your phone camera app.</span>";
-    return;
-  }
-  const config={fps:10,qrbox:250};
-  scannerInstance.start(
-    {facingMode:"environment"},
-    config,
-    (decodedText)=>{handleScannedText(decodedText);},
-    ()=>{}
-  ).then(()=>{
+
+  qrReaderDiv.innerHTML="";
+  const video=document.createElement("video");
+  video.setAttribute("playsinline","true"); // important for iOS
+  qrReaderDiv.appendChild(video);
+
+  const canvas=document.createElement("canvas");
+  const ctx=canvas.getContext("2d");
+
+  window._scanVideo=video;
+  window._scanCanvas=canvas;
+  window._scanCtx=ctx;
+
+  setScanNotice("ok","Starting camera…","STARTING");
+
+  navigator.mediaDevices.getUserMedia({
+    video:{facingMode:"environment",width:{ideal:640},height:{ideal:480}},
+    audio:false
+  }).then(stream=>{
+    window._scanStream=stream;
+    video.srcObject=stream;
+    window._scanRunning=true;
+    video.play();
+
+    function tick(){
+      if(!window._scanRunning)return;
+      if(video.readyState===HTMLMediaElement.HAVE_ENOUGH_DATA){
+        const w=video.videoWidth || 320;
+        const h=video.videoHeight || 240;
+        canvas.width=w;
+        canvas.height=h;
+        ctx.drawImage(video,0,0,w,h);
+        try{
+          const imageData=ctx.getImageData(0,0,w,h);
+          const code=window.jsQR(imageData.data,w,h,{inversionAttempts:"dontInvert"});
+          if(code && code.data){
+            handleScannedText(code.data);
+          }
+        }catch(e){}
+      }
+      requestAnimationFrame(tick);
+    }
     setScanNotice("ok","Camera active. Point at a QR.","READY");
+    requestAnimationFrame(tick);
   }).catch(err=>{
     console.error(err);
     setScanNotice("err","Camera permission denied or unavailable.","ERROR");
-    area.innerHTML="<span class='muted'>Unable to access camera. Check browser permission or use your phone camera app.</span>";
+    qrReaderDiv.innerHTML="<span class='muted'>Unable to access camera. Check browser permission or use your phone camera app.</span>";
   });
 }
+
 scanPayBtn.onclick=()=>{if(!lastScan||lastScan.is_free)return;openPayModal({student_id:lastScan.student_id,class_id:lastScan.class_id,name:lastScan.name,month:lastScan.month});};
 
 // manual attendance
@@ -693,7 +770,11 @@ scanManualForm.onsubmit=async e=>{
 };
 
 // ---- attendance view ----
-const attForm=document.getElementById("attendance-load-form"),attClass=document.getElementById("attendance-class"),attDate=document.getElementById("attendance-date"),attInfo=document.getElementById("attendance-sheet-info"),attBody=document.getElementById("attendance-table-body");
+const attForm=document.getElementById("attendance-load-form"),
+      attClass=document.getElementById("attendance-class"),
+      attDate=document.getElementById("attendance-date"),
+      attInfo=document.getElementById("attendance-sheet-info"),
+      attBody=document.getElementById("attendance-table-body");
 attDate.value=today();
 attForm.onsubmit=async e=>{
   e.preventDefault();
@@ -711,7 +792,11 @@ attForm.onsubmit=async e=>{
 };
 
 // ---- unpaid ----
-const unpaidForm=document.getElementById("unpaid-form"),unpaidMonth=document.getElementById("unpaid-month"),unpaidClass=document.getElementById("unpaid-class"),unpaidInfo=document.getElementById("unpaid-info"),unpaidBody=document.getElementById("unpaid-table-body");
+const unpaidForm=document.getElementById("unpaid-form"),
+      unpaidMonth=document.getElementById("unpaid-month"),
+      unpaidClass=document.getElementById("unpaid-class"),
+      unpaidInfo=document.getElementById("unpaid-info"),
+      unpaidBody=document.getElementById("unpaid-table-body");
 unpaidMonth.value=curMonth();
 unpaidForm.onsubmit=async e=>{
   e.preventDefault();
@@ -731,7 +816,10 @@ unpaidForm.onsubmit=async e=>{
 };
 
 // ---- finance ----
-const financeForm=document.getElementById("finance-form"),finMonth=document.getElementById("finance-month"),finInfo=document.getElementById("finance-info"),finBody=document.getElementById("finance-table-body");
+const financeForm=document.getElementById("finance-form"),
+      finMonth=document.getElementById("finance-month"),
+      finInfo=document.getElementById("finance-info"),
+      finBody=document.getElementById("finance-table-body");
 finMonth.value=curMonth();
 financeForm.onsubmit=async e=>{
   e.preventDefault();
@@ -744,7 +832,16 @@ financeForm.onsubmit=async e=>{
 };
 
 // ---- payment modal ----
-const payModal=document.getElementById("payment-modal"),payClose=document.getElementById("payment-close-btn"),payLabel=document.getElementById("payment-student-label"),payForm=document.getElementById("payment-form"),payStudent=document.getElementById("payment-student-id"),payClass=document.getElementById("payment-class-id"),payMonth=document.getElementById("payment-month"),payAmt=document.getElementById("payment-amount"),payMethod=document.getElementById("payment-method"),payStatus=document.getElementById("payment-status");
+const payModal=document.getElementById("payment-modal"),
+      payClose=document.getElementById("payment-close-btn"),
+      payLabel=document.getElementById("payment-student-label"),
+      payForm=document.getElementById("payment-form"),
+      payStudent=document.getElementById("payment-student-id"),
+      payClass=document.getElementById("payment-class-id"),
+      payMonth=document.getElementById("payment-month"),
+      payAmt=document.getElementById("payment-amount"),
+      payMethod=document.getElementById("payment-method"),
+      payStatus=document.getElementById("payment-status");
 function openPayModal(o){payStudent.value=o.student_id;payClass.value=o.class_id;payLabel.textContent="For "+(o.name||"student");payMonth.value=o.month||curMonth();payAmt.value="2000";payMethod.value="cash";payStatus.textContent="";payModal.classList.add("active");}
 function closePayModal(){payModal.classList.remove("active");}
 payClose.onclick=closePayModal;payModal.onclick=e=>{if(e.target===payModal)closePayModal();};
@@ -756,8 +853,14 @@ payForm.onsubmit=async e=>{
 };
 
 // ---- settings DB info + upload + grade export ----
-const dbInfoBtn=document.getElementById("db-info-btn"),dbInfoText=document.getElementById("db-info-text"),dbUploadFile=document.getElementById("db-upload-file"),dbUploadBtn=document.getElementById("db-upload-btn"),dbUploadStatus=document.getElementById("db-upload-status");
-const exportGradeSelect=document.getElementById("export-grade"),exportGradeBtn=document.getElementById("export-grade-btn"),exportGradeInfo=document.getElementById("export-grade-info");
+const dbInfoBtn=document.getElementById("db-info-btn"),
+      dbInfoText=document.getElementById("db-info-text"),
+      dbUploadFile=document.getElementById("db-upload-file"),
+      dbUploadBtn=document.getElementById("db-upload-btn"),
+      dbUploadStatus=document.getElementById("db-upload-status");
+const exportGradeSelect=document.getElementById("export-grade"),
+      exportGradeBtn=document.getElementById("export-grade-btn"),
+      exportGradeInfo=document.getElementById("export-grade-info");
 dbInfoBtn.onclick=async()=>{try{const i=await jget("/admin/db/info");dbInfoText.textContent="Size: "+i.size_kb+" KB · Students: "+i.students+" · Payments: "+i.payments+" · Attendance: "+i.attendance;}catch(err){dbInfoText.textContent=err.message||"Failed to load DB info.";}};
 dbUploadBtn.onclick=async()=>{
   const f=dbUploadFile.files[0];if(!f){dbUploadStatus.textContent="Choose a .db file first.";return;}
@@ -832,9 +935,7 @@ p{margin:.15rem 0;font-size:.85rem;color:#9ca3af}</style></head>
 </div></body></html>`;
     res.type("html").send(html);
   } catch (e) {
-    res
-      .status(e.status || 500)
-      .send(e.message || "Scan failed");
+    res.status(e.status || 500).send(e.message || "Scan failed");
   }
 });
 
@@ -934,9 +1035,7 @@ app.get("/admin/export/payments.csv", (req, res) => {
 // classes
 app.get("/api/classes", (req, res) => {
   try {
-    res.json({
-      classes: stmts.listClasses().all()
-    });
+    res.json({ classes: stmts.listClasses().all() });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed" });
@@ -946,9 +1045,7 @@ app.get("/api/classes", (req, res) => {
 // students CRUD
 app.get("/api/students", (req, res) => {
   try {
-    res.json({
-      students: stmts.listStudents().all()
-    });
+    res.json({ students: stmts.listStudents().all() });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed" });
