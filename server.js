@@ -257,6 +257,7 @@ tbody tr:hover{background:rgba(30,64,175,.24);}
 footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem 1rem;border-top:1px solid rgba(15,23,42,.96);background:radial-gradient(circle at top left,rgba(15,23,42,.95),rgba(2,6,23,.99));}
 @media(max-width:640px){.header-inner{flex-direction:column;align-items:stretch;}nav{justify-content:flex-start;}}
 </style>
+<script src="https://unpkg.com/html5-qrcode@2.3.10/html5-qrcode.min.js"></script>
 </head><body>
 <header><div class="header-inner">
   <div class="logo"><div class="logo-pill"></div><span>Class Manager</span></div>
@@ -340,10 +341,10 @@ footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem
 <section id="tab-scanner" class="tab-section">
   <div class="cards">
     <div class="card">
-      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Camera QR (if supported).</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
+      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Camera QR (phone-friendly).</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
       <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Open scanner to start.</div><div class="tag">READY</div></div>
-      <div id="qr-reader"><span class="muted">When supported, camera preview will appear here and scan QRs automatically.</span></div>
-      <div class="muted">If your phone browser doesn't support in-page scanning, use the normal camera app to scan a QR; it will open a link like <code>/scan/&lt;token&gt;</code> and attendance will be recorded automatically.</div>
+      <div id="qr-reader"><span class="muted">When scanner starts, camera preview will appear here and scan QRs automatically.</span></div>
+      <div class="muted">If anything fails, use the normal camera app to scan a QR; it will open a link like <code>/scan/&lt;token&gt;</code> and attendance will be recorded automatically.</div>
 
       <form id="scanner-manual-form" style="margin-top:.75rem;">
         <div class="card-subtitle" style="margin-bottom:.35rem;">Manual attendance (phone → today)</div>
@@ -571,9 +572,9 @@ async function loadStudents(){
 }
 async function refreshStats(){try{const d=await jget("/api/finance?month="+encodeURIComponent(curMonth()));statRev.textContent=d.total||0;}catch(e){}}
 
-// ---- scanner using BarcodeDetector (no server libs) ----
+// ---- scanner using html5-qrcode (phone-friendly) ----
 const scanNotice=document.getElementById("scan-notice"),scanLast=document.getElementById("scanner-last-details"),scanPayBtn=document.getElementById("scanner-payment-btn"),scanManualForm=document.getElementById("scanner-manual-form"),scanManualPhone=document.getElementById("scanner-manual-phone"),scanManualStatus=document.getElementById("scanner-manual-status");
-let scannerInitialized=false,scannerStream=null,scannerDetector=null,lastScanRaw=null;
+let scannerInitialized=false,scannerInstance=null,lastScanRaw=null;
 
 function setScanNotice(type,msg,tag){
   if(!scanNotice)return;
@@ -641,51 +642,42 @@ async function handleScannedText(text){
     setScanNotice("err",err.message||"Scan failed.","ERROR");
   }
 }
-async function initScanner(){
+function initScanner(){
   if(scannerInitialized)return;
   scannerInitialized=true;
   const area=document.getElementById("qr-reader");
   if(!area)return;
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
     setScanNotice("err","Camera not supported in this browser.","UNSUPPORTED");
-    area.innerHTML="<span class='muted'>Camera not supported. Use manual phone input or your phone camera app.</span>";
+    area.innerHTML="<span class='muted'>Camera not supported. Use your phone camera app to scan the QR codes.</span>";
     return;
   }
-  if(!("BarcodeDetector" in window)){
-    setScanNotice("err","QR scanning not supported. Use phone camera app or manual input.","UNSUPPORTED");
-    area.innerHTML="<span class='muted'>Your browser does not support in-page QR scanning. Use your phone's normal camera app to scan the QR codes (they open /scan/&lt;token&gt;) or mark by phone number.</span>";
+  if(!window.Html5Qrcode){
+    setScanNotice("err","QR library failed to load in this page. Check internet / ad blocker.","LIB");
+    area.innerHTML="<span class='muted'>QR scanner script could not load. Check internet connection or ad blocker, or use your phone camera app.</span>";
     return;
   }
-  scannerDetector=new BarcodeDetector({formats:["qr_code"]});
-  const video=document.createElement("video");
-  video.playsInline=true;video.muted=true;video.autoplay=true;
-  video.style.width="100%";video.style.height="100%";video.style.objectFit="cover";
-  area.innerHTML="";area.appendChild(video);
+  area.innerHTML="";
   try{
-    scannerStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
-    video.srcObject=scannerStream;
-  }catch(err){
+    scannerInstance=new Html5Qrcode("qr-reader");
+  }catch(e){
+    setScanNotice("err","Failed to initialize QR scanner.","ERROR");
+    area.innerHTML="<span class='muted'>Could not init QR scanner. Use your phone camera app.</span>";
+    return;
+  }
+  const config={fps:10,qrbox:250};
+  scannerInstance.start(
+    {facingMode:"environment"},
+    config,
+    (decodedText)=>{handleScannedText(decodedText);},
+    ()=>{}
+  ).then(()=>{
+    setScanNotice("ok","Camera active. Point at a QR.","READY");
+  }).catch(err=>{
     console.error(err);
     setScanNotice("err","Camera permission denied or unavailable.","ERROR");
     area.innerHTML="<span class='muted'>Unable to access camera. Check browser permission or use your phone camera app.</span>";
-    return;
-  }
-  const scanLoop=async()=>{
-    if(!video.srcObject){return;}
-    if(video.readyState!==HTMLMediaElement.HAVE_ENOUGH_DATA){
-      requestAnimationFrame(scanLoop);return;
-    }
-    try{
-      const codes=await scannerDetector.detect(video);
-      if(codes && codes.length){
-        const raw=codes[0].rawValue || "";
-        if(raw) handleScannedText(raw);
-      }
-    }catch(e){}
-    requestAnimationFrame(scanLoop);
-  };
-  setScanNotice("ok","Camera active. Point at a QR.","READY");
-  requestAnimationFrame(scanLoop);
+  });
 }
 scanPayBtn.onclick=()=>{if(!lastScan||lastScan.is_free)return;openPayModal({student_id:lastScan.student_id,class_id:lastScan.class_id,name:lastScan.name,month:lastScan.month});};
 
