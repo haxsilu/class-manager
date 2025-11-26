@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Class Management System - Login</title>
+  <link rel="stylesheet" href="/css/app.css" />
+</head>
+<body class="bg-night text-slate">
+  <main class="page-shell">
+    <section class="card login-card">
+      <div class="login-head">
+        <div>
+          <p class="eyebrow">Railway Ready Platform</p>
+          <h1>Class Management System</h1>
+          <p class="subtitle">Secure access for administrators and students.</p>
+        </div>
+      </div>
+
+      <div class="role-toggle" role="tablist">
+        <button class="chip active" data-role="admin">Administrator Login</button>
+        <button class="chip" data-role="student">Student Login</button>
+      </div>
+
+      <form id="login-form" class="form-grid" autocomplete="off">
+        <input type="hidden" name="role" id="login-role" value="admin" />
+        <label>
+          <span>Username</span>
+          <input type="text" name="username" id="login-username" placeholder="jane" required />
+        </label>
+        <label>
+          <span>Password</span>
+          <input type="password" name="password" id="login-password" placeholder="••••••" required />
+        </label>
+        <button type="submit" class="btn-primary">Sign In</button>
+        <p class="hint">
+          Admin default credentials: <code>admin / admin123</code><br />
+          Student username = phone, password = <code>1234</code>
+        </p>
+      </form>
+      <div id="login-status" class="status"></div>
+    </section>
+  </main>
+  <footer class="footer">Created by Pulindu Pansilu</footer>
+  <script src="/js/login.js" defer></script>
+</body>
+</html>
