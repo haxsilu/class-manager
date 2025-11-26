@@ -1,1286 +1,1134 @@
 // server.js
-// Single-file Class Manager (students / QR attendance / payments / finance)
-// Optimized for Railway + mobile QR scanning
-//
-// Setup:
-//   npm init -y
-//   npm install express better-sqlite3 qrcode
-//   node server.js
+// Single-file Class Management + Payment + Exam Registration System
+// Backend: Node.js (CommonJS), Express, SQLite (better-sqlite3)
+// Frontend: Single-page HTML+CSS+JS served from "/"
 
 const express = require("express");
-const path = require("path");
-const fs = require("fs");
-const crypto = require("crypto");
-const QRCode = require("qrcode");
 const Database = require("better-sqlite3");
+const path = require("path");
 
-const PORT = process.env.PORT || 5050;
+// ---------- Runtime setup ----------
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "class_manager.db");
+const PORT = Number(process.env.PORT || 5050);
 
-// Use a persistent folder (works well with Railway volumes)
-const DB_FILE = path.join("/app/data", "class_manager.db");
-
-// ---------- DB SETUP ----------
-if (!fs.existsSync(path.dirname(DB_FILE))) {
-  fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
-}
-if (!fs.existsSync(DB_FILE)) {
-  fs.closeSync(fs.openSync(DB_FILE, "w"));
-}
-
-const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS classes(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  title TEXT NOT NULL UNIQUE,
-  fee INTEGER NOT NULL DEFAULT 0 CHECK(fee>=0)
-);
-CREATE TABLE IF NOT EXISTS students(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  phone TEXT,
-  grade TEXT NOT NULL,
-  qr_token TEXT UNIQUE,
-  is_free INTEGER NOT NULL DEFAULT 0 CHECK(is_free IN(0,1))
-);
-CREATE TABLE IF NOT EXISTS attendance(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  student_id INTEGER NOT NULL,
-  class_id INTEGER NOT NULL,
-  date TEXT NOT NULL,
-  present INTEGER NOT NULL DEFAULT 1 CHECK(present IN(0,1)),
-  UNIQUE(student_id,class_id,date),
-  FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE,
-  FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS payments(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  student_id INTEGER NOT NULL,
-  class_id INTEGER NOT NULL,
-  month TEXT NOT NULL,
-  amount INTEGER NOT NULL CHECK(amount>=0),
-  method TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT(datetime('now')),
-  UNIQUE(student_id,class_id,month),
-  FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE,
-  FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE
-);`;
-
-let db;
+// ---------- Database ----------
 function openDb() {
-  db = new Database(DB_FILE);
+  const db = new Database(DB_PATH);
+  db.pragma("journal_mode = wal");
   db.pragma("foreign_keys = ON");
-  db.exec(SCHEMA_SQL);
 
-  // Seed classes if empty
-  if (db.prepare("SELECT COUNT(*) c FROM classes").get().c === 0) {
-    const ins = db.prepare("INSERT INTO classes(title,fee) VALUES(?,2000)");
-    const tx = db.transaction(() =>
-      ["Grade 6", "Grade 7", "Grade 8", "O/L"].forEach((t) => ins.run(t))
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS students (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      name       TEXT NOT NULL,
+      phone      TEXT UNIQUE,
+      created_at TEXT DEFAULT (datetime('now'))
     );
-    tx();
+
+    CREATE TABLE IF NOT EXISTS classes (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT NOT NULL UNIQUE,
+      monthly_fee INTEGER NOT NULL CHECK (monthly_fee >= 0),
+      created_at  TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS enrollments (
+      student_id  INTEGER NOT NULL,
+      class_id    INTEGER NOT NULL,
+      enrolled_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (student_id, class_id),
+      FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+      FOREIGN KEY (class_id)   REFERENCES classes(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS payments (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id INTEGER NOT NULL,
+      class_id   INTEGER NOT NULL,
+      month      TEXT    NOT NULL, -- YYYY-MM
+      amount     INTEGER NOT NULL CHECK (amount >= 0),
+      method     TEXT    NOT NULL DEFAULT 'cash',
+      paid_at    TEXT    DEFAULT (datetime('now')),
+      UNIQUE(student_id, class_id, month),
+      FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+      FOREIGN KEY (class_id)   REFERENCES classes(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_students_name ON students(name);
+    CREATE INDEX IF NOT EXISTS idx_classes_name  ON classes(name);
+    CREATE INDEX IF NOT EXISTS idx_payments_month ON payments(month);
+    CREATE INDEX IF NOT EXISTS idx_enroll_class  ON enrollments(class_id);
+
+    -- Exam slots & bookings
+    CREATE TABLE IF NOT EXISTS exam_slots (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      label      TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time   TEXT NOT NULL,
+      max_seats  INTEGER NOT NULL CHECK (max_seats > 0)
+    );
+
+    CREATE TABLE IF NOT EXISTS exam_bookings (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      slot_id       INTEGER NOT NULL,
+      seat_index    INTEGER NOT NULL,
+      seat_pos      INTEGER NOT NULL,
+      student_name  TEXT NOT NULL,
+      student_class TEXT NOT NULL,
+      created_at    TEXT DEFAULT (datetime('now')),
+      UNIQUE (slot_id, seat_index, seat_pos),
+      FOREIGN KEY (slot_id) REFERENCES exam_slots(id) ON DELETE CASCADE
+    );
+  `);
+
+  // Seed default classes if missing
+  const existingClasses = db
+    .prepare("SELECT name FROM classes")
+    .all()
+    .map((r) => r.name);
+  ["Grade 6", "Grade 7", "Grade 8", "O/L"].forEach((title) => {
+    if (!existingClasses.includes(title)) {
+      db.prepare(
+        "INSERT INTO classes(name, monthly_fee) VALUES(?, 2000)"
+      ).run(title);
+    }
+  });
+
+  // Seed exam slots if missing
+  const examCount = db
+    .prepare("SELECT COUNT(*) AS c FROM exam_slots")
+    .get().c;
+  if (examCount === 0) {
+    // Session 1: 2pm–5pm, 25 benches
+    db.prepare(
+      "INSERT INTO exam_slots(label,start_time,end_time,max_seats) VALUES (?,?,?,?)"
+    ).run(
+      "Session 1 – 2:00 PM to 5:00 PM",
+      "2025-12-05 14:00",
+      "2025-12-05 17:00",
+      25
+    );
+    // Session 2: 5.30pm–8.30pm, 24 benches
+    db.prepare(
+      "INSERT INTO exam_slots(label,start_time,end_time,max_seats) VALUES (?,?,?,?)"
+    ).run(
+      "Session 2 – 5:30 PM to 8:30 PM",
+      "2025-12-05 17:30",
+      "2025-12-05 20:30",
+      24
+    );
   }
+
+  return db;
 }
-openDb();
 
-// ---------- HELPERS ----------
-const genToken = () =>
-  crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
+const db = openDb();
 
-const todayStr = () => {
-  const d = new Date();
-  return (
-    d.getFullYear() +
-    "-" +
-    String(d.getMonth() + 1).padStart(2, "0") +
-    "-" +
-    String(d.getDate()).padStart(2, "0")
-  );
+// ---------- Helpers ----------
+function monthKey(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return y + "-" + m;
+}
+
+function isValidMonth(m) {
+  return typeof m === "string" && /^\d{4}-\d{2}$/.test(m);
+}
+
+function toId(val, field = "id") {
+  const n = Number(val);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error("Invalid " + field);
+  }
+  return n;
+}
+
+function sendError(res, code, msg) {
+  res.status(code).json({ error: msg });
+}
+
+// ---------- Prepared statements ----------
+const studentStmt = {
+  list: db.prepare("SELECT * FROM students ORDER BY name COLLATE NOCASE"),
+  find: db.prepare("SELECT * FROM students WHERE id=?"),
+  insert: db.prepare("INSERT INTO students(name,phone) VALUES(?,?)"),
+  delete: db.prepare("DELETE FROM students WHERE id=?"),
 };
 
-const monthStr = () => {
-  const d = new Date();
-  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+const classStmt = {
+  list: db.prepare("SELECT * FROM classes ORDER BY name COLLATE NOCASE"),
+  find: db.prepare("SELECT * FROM classes WHERE id=?"),
+  insert: db.prepare("INSERT INTO classes(name,monthly_fee) VALUES(?,?)"),
 };
 
-const classByGradeStmt = () =>
-  db.prepare("SELECT id,title,fee FROM classes WHERE title=?");
-
-// Pre-prepared statements for speed
-const stmts = {
-  countStudents: () => db.prepare("SELECT COUNT(*) c FROM students"),
-  countPayments: () => db.prepare("SELECT COUNT(*) c FROM payments"),
-  countAttendance: () => db.prepare("SELECT COUNT(*) c FROM attendance"),
-  listClasses: () => db.prepare("SELECT id,title,fee FROM classes ORDER BY id"),
-  listStudents: () =>
-    db.prepare("SELECT id,name,phone,grade,is_free,qr_token FROM students ORDER BY name"),
-  insertStudent: () =>
-    db.prepare(
-      "INSERT INTO students(name,phone,grade,qr_token,is_free) VALUES(?,?,?,?,?)"
-    ),
-  selectStudentById: () =>
-    db.prepare(
-      "SELECT id,name,phone,grade,qr_token,is_free FROM students WHERE id=?"
-    ),
-  selectStudentForScan: () =>
-    db.prepare(
-      "SELECT id,name,phone,grade,is_free FROM students WHERE qr_token=?"
-    ),
-  selectStudentByPhone: () =>
-    db.prepare(
-      "SELECT id,name,phone,grade,is_free FROM students WHERE phone=?"
-    ),
-  updateStudent: () =>
-    db.prepare(
-      "UPDATE students SET name=?,phone=?,grade=?,is_free=? WHERE id=?"
-    ),
-  deleteStudent: () => db.prepare("DELETE FROM students WHERE id=?"),
-  attendanceUpsert: () =>
-    db.prepare(
-      "INSERT INTO attendance(student_id,class_id,date,present) VALUES(?,?,?,1) " +
-        "ON CONFLICT(student_id,class_id,date) DO UPDATE SET present=1"
-    ),
-  paymentSelectMonth: () =>
-    db.prepare(
-      "SELECT id FROM payments WHERE student_id=? AND class_id=? AND month=?"
-    ),
-  paymentUpsert: () =>
-    db.prepare(
-      "INSERT INTO payments(student_id,class_id,month,amount,method) VALUES(?,?,?,?,?) " +
-        "ON CONFLICT(student_id,class_id,month) DO UPDATE " +
-        "SET amount=excluded.amount,method=excluded.method,created_at=datetime('now')"
-    ),
-  unpaidBase: () =>
-    db.prepare(
-      "SELECT s.id student_id,s.name,s.phone,s.grade,c.id class_id,c.title class_title " +
-        "FROM students s JOIN classes c ON c.title=s.grade " +
-        "WHERE s.is_free=0 AND NOT EXISTS (" +
-        "SELECT 1 FROM payments p WHERE p.student_id=s.id AND p.class_id=c.id AND p.month=? " +
-        ") ORDER BY c.id,s.name"
-    ),
-  financeMonth: () =>
-    db.prepare(
-      "SELECT c.id class_id,c.title class_title," +
-        "COUNT(p.id) payments,COALESCE(SUM(p.amount),0) total " +
-        "FROM classes c LEFT JOIN payments p ON p.class_id=c.id AND p.month=? " +
-        "GROUP BY c.id,c.title ORDER BY c.id"
-    ),
-  attendanceList: () =>
-    db.prepare(
-      "SELECT s.id student_id,s.name,s.phone,s.is_free," +
-        "CASE WHEN a.id IS NULL THEN 0 ELSE a.present END present " +
-        "FROM students s JOIN classes c ON c.title=s.grade " +
-        "LEFT JOIN attendance a ON a.student_id=s.id AND a.class_id=c.id AND a.date=? " +
-        "WHERE c.id=? ORDER BY s.name"
-    ),
-  dbInfo: () => ({
-    students: stmts.countStudents().get().c,
-    payments: stmts.countPayments().get().c,
-    attendance: stmts.countAttendance().get().c
-  }),
-  studentsCsvAll: () =>
-    db.prepare(
-      "SELECT id,name,phone,grade,is_free,qr_token FROM students ORDER BY grade,name"
-    ),
-  studentsCsvByGrade: () =>
-    db.prepare(
-      "SELECT id,name,phone,grade,is_free,qr_token FROM students WHERE grade=? ORDER BY name"
-    ),
-  paymentsCsv: () =>
-    db.prepare(
-      "SELECT p.id,p.student_id,s.name student_name,s.phone,s.grade," +
-        "p.class_id,c.title class_title,p.month,p.amount,p.method,p.created_at " +
-        "FROM payments p JOIN students s ON s.id=p.student_id " +
-        "JOIN classes c ON c.id=p.class_id " +
-        "ORDER BY p.month DESC,c.id,s.name"
-    ),
-  allStudentsForQr: () =>
-    db.prepare("SELECT id,name,grade,qr_token FROM students ORDER BY grade,name")
+const enrollStmt = {
+  enroll: db.prepare(
+    "INSERT INTO enrollments(student_id,class_id) VALUES(?,?)"
+  ),
+  studentsInClass: db.prepare(`
+    SELECT s.*
+    FROM enrollments e
+    JOIN students s ON s.id = e.student_id
+    WHERE e.class_id=?
+    ORDER BY s.name COLLATE NOCASE
+  `),
 };
 
-// ---------- EXPRESS ----------
+const paymentStmt = {
+  upsert: db.prepare(`
+    INSERT INTO payments(student_id,class_id,month,amount,method)
+    VALUES (?,?,?,?,?)
+    ON CONFLICT(student_id,class_id,month)
+    DO UPDATE SET amount=excluded.amount, method=excluded.method
+  `),
+  unpaid: db.prepare(`
+    SELECT
+      c.id   AS class_id,
+      c.name AS class_name,
+      s.id   AS student_id,
+      s.name AS student_name,
+      s.phone
+    FROM enrollments e
+    JOIN students s ON s.id = e.student_id
+    JOIN classes  c ON c.id = e.class_id
+    LEFT JOIN payments p
+           ON p.student_id = e.student_id
+          AND p.class_id   = e.class_id
+          AND p.month      = ?
+    WHERE p.id IS NULL
+    ORDER BY c.name COLLATE NOCASE, s.name COLLATE NOCASE
+  `),
+  summaryByClass: db.prepare(`
+    SELECT
+      c.id   AS class_id,
+      c.name AS class_name,
+      COUNT(p.id)               AS payments_count,
+      COALESCE(SUM(p.amount),0) AS total_amount
+    FROM classes c
+    LEFT JOIN payments p
+           ON p.class_id = c.id
+          AND p.month    = ?
+    GROUP BY c.id
+    ORDER BY c.name COLLATE NOCASE
+  `),
+};
+
+const examStmt = {
+  listSlots: db.prepare("SELECT * FROM exam_slots ORDER BY id"),
+  findSlot: db.prepare("SELECT * FROM exam_slots WHERE id=?"),
+  bookingsBySlot: db.prepare(
+    "SELECT * FROM exam_bookings WHERE slot_id=? ORDER BY seat_index, seat_pos"
+  ),
+  insertBooking: db.prepare(`
+    INSERT INTO exam_bookings(slot_id,seat_index,seat_pos,student_name,student_class)
+    VALUES (?,?,?,?,?)
+  `),
+};
+
+// ---------- Express app ----------
 const app = express();
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json());
 
-// ---------- FRONTEND (SPA with mobile-optimized QR scanning using jsQR) ----------
-const FRONTEND = `<!doctype html><html lang="en"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Class Manager</title>
-<style>
-:root{color-scheme:dark;--bg:#020617;--bg2:#0f172a;--b:#1f2937;--a:#3b82f6;--a-soft:rgba(59,130,246,.12);--t:#e5e7eb;--t-soft:#9ca3af;}
-*{box-sizing:border-box;margin:0;padding:0}
-body{min-height:100vh;display:flex;flex-direction:column;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;background:radial-gradient(circle at top left,#0b1120,#020617);color:var(--t);}
-header{position:sticky;top:0;z-index:20;background:rgba(15,23,42,.96);backdrop-filter:blur(10px);border-bottom:1px solid var(--b);}
-.header-inner{max-width:1180px;margin:0 auto;padding:.75rem 1rem;display:flex;align-items:center;justify-content:space-between;gap:.75rem;}
-.logo{display:flex;align-items:center;gap:.5rem;font-weight:600;letter-spacing:.05em;font-size:1rem;}
-.logo-pill{width:26px;height:26px;border-radius:999px;background:radial-gradient(circle at 25% 25%,#60a5fa,#1d4ed8);box-shadow:0 0 0 1px rgba(59,130,246,.7),0 0 16px rgba(59,130,246,.5);}
-nav{display:flex;flex-wrap:wrap;gap:.4rem;}
-.nav-btn{border-radius:999px;border:1px solid transparent;background:transparent;color:var(--t-soft);padding:.32rem .7rem;font-size:.75rem;display:inline-flex;align-items:center;gap:.3rem;cursor:pointer;transition:.15s;}
-.nav-btn span.icon{width:18px;height:18px;border-radius:999px;border:1px solid rgba(148,163,184,.4);}
-.nav-btn:hover{border-color:rgba(148,163,184,.5);background:rgba(15,23,42,.9);color:var(--t);}
-.nav-btn.active{border-color:var(--a);background:var(--a-soft);box-shadow:0 0 0 1px rgba(37,99,235,.6);color:#e5e7eb;}
-main{flex:1;max-width:1180px;margin:1rem auto 1.5rem;padding:0 1rem;width:100%;}
-.cards{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(0,1.2fr);gap:1rem;margin-bottom:1rem;}
-@media(max-width:900px){.cards{grid-template-columns:minmax(0,1fr);}}
-.card{position:relative;padding:1rem;border-radius:1rem;background:rgba(15,23,42,.97);border:1px solid rgba(15,23,42,1);box-shadow:0 14px 30px rgba(0,0,0,.7),inset 0 0 0 1px rgba(148,163,184,.1);overflow:hidden;}
-.card::before{content:"";position:absolute;inset:-40%;background:radial-gradient(circle at top left,rgba(59,130,246,.12),transparent 55%),radial-gradient(circle at bottom right,rgba(30,64,175,.16),transparent 55%);opacity:.9;pointer-events:none;z-index:-1;}
-.card-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.55rem;gap:.5rem;}
-.card-title{font-size:.9rem;text-transform:uppercase;letter-spacing:.08em;color:var(--t-soft);}
-.card-subtitle{font-size:.75rem;color:var(--t-soft);}
-.badge{border-radius:999px;border:1px solid rgba(148,163,184,.4);padding:.1rem .5rem;font-size:.7rem;color:var(--t-soft);display:inline-flex;align-items:center;gap:.25rem;}
-.badge-dot{width:6px;height:6px;border-radius:50%;background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,.7);}
-.input-row{display:flex;flex-wrap:wrap;gap:.6rem;margin-bottom:.6rem;}
-.field{flex:1 1 140px;min-width:0;}
-label{font-size:.75rem;color:var(--t-soft);display:block;margin-bottom:.15rem;}
-input[type=text],input[type=tel],input[type=date],input[type=month],select{width:100%;border-radius:999px;border:1px solid var(--b);background:rgba(15,23,42,.95);color:var(--t);padding:.45rem .7rem;font-size:.8rem;outline:none;transition:.12s;}
-input:focus,select:focus{border-color:var(--a);box-shadow:0 0 0 1px rgba(37,99,235,.7);}
-input[type=checkbox]{width:14px;height:14px;border-radius:4px;border:1px solid var(--b);background:rgba(15,23,42,.9);accent-color:var(--a);}
-button,.btn{border-radius:999px;border:1px solid transparent;background:var(--a);color:#e5e7eb;padding:.43rem .9rem;font-size:.8rem;cursor:pointer;display:inline-flex;align-items:center;gap:.3rem;transition:.12s;text-decoration:none;}
-button:hover,.btn:hover{background:#2563eb;box-shadow:0 12px 28px rgba(37,99,235,.55);transform:translateY(-.5px);}
-.btn-outline{background:rgba(15,23,42,.9);border-color:var(--b);color:var(--t-soft);}
-.btn-outline:hover{border-color:rgba(148,163,184,.85);background:rgba(15,23,42,1);color:var(--t);}
-.btn-small{padding:.25rem .6rem;font-size:.7rem;}
-.pill{border-radius:999px;border:1px solid var(--b);padding:.3rem .6rem;font-size:.7rem;color:var(--t-soft);}
-.pill-quiet{background:rgba(15,23,42,.8);}
-.notice{border-radius:.8rem;border:1px solid rgba(148,163,184,.35);background:rgba(15,23,42,.97);padding:.6rem .75rem;font-size:.75rem;color:var(--t-soft);display:flex;justify-content:space-between;align-items:center;gap:.75rem;margin-bottom:.6rem;}
-.notice strong{color:var(--t);}
-.notice.ok{border-color:rgba(52,211,153,.55);}
-.notice.err{border-color:rgba(248,113,113,.75);color:#fecaca;}
-.tab-section{display:none;}
-.tab-section.active{display:block;}
-.table-container{border-radius:.8rem;border:1px solid var(--b);background:rgba(15,23,42,.97);overflow-x:auto;overflow-y:auto;max-height:480px;}
-table{width:100%;border-collapse:collapse;font-size:.78rem;min-width:540px;}
-thead{background:rgba(15,23,42,.96);position:sticky;top:0;z-index:5;}
-th,td{padding:.45rem .6rem;border-bottom:1px solid rgba(31,41,55,.96);white-space:nowrap;text-align:left;}
-th{font-size:.7rem;font-weight:500;color:var(--t-soft);text-transform:uppercase;}
-tbody tr:nth-child(even){background:rgba(15,23,42,.92);}
-tbody tr:hover{background:rgba(30,64,175,.24);}
-.tag{border-radius:999px;border:1px solid rgba(148,163,184,.4);padding:.1rem .5rem;font-size:.65rem;text-transform:uppercase;letter-spacing:.06em;}
-.tag-free{border-color:rgba(52,211,153,.7);color:#bbf7d0;}
-.tag-unpaid{border-color:rgba(248,113,113,.7);color:#fecaca;}
-.tag-paid{border-color:rgba(52,211,153,.7);color:#a7f3d0;}
-.muted{font-size:.75rem;color:var(--t-soft);}
-.flex-between{display:flex;justify-content:space-between;align-items:center;gap:.5rem;}
-.flex-row{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;}
-.modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.85);display:none;justify-content:center;align-items:center;z-index:50;padding:1rem;}
-.modal-backdrop.active{display:flex;}
-.modal{max-width:420px;width:100%;border-radius:1rem;background:#020617;border:1px solid var(--b);box-shadow:0 18px 42px rgba(0,0,0,.9);padding:1rem;}
-.modal h3{margin:0 0 .6rem;font-size:.95rem;}
-#qr-reader{width:100%;max-width:360px;border-radius:1rem;overflow:hidden;border:1px solid var(--b);margin-bottom:.7rem;background:#020617;min-height:220px;display:flex;align-items:center;justify-content:center;}
-#qr-reader video{width:100%;height:100%;object-fit:cover;}
-#students-search{max-width:160px;}
-footer{text-align:center;font-size:.7rem;color:var(--t-soft);padding:.75rem 1rem 1rem;border-top:1px solid rgba(15,23,42,.96);background:radial-gradient(circle at top left,rgba(15,23,42,.95),rgba(2,6,23,.99));}
-@media(max-width:640px){.header-inner{flex-direction:column;align-items:stretch;}nav{justify-content:flex-start;}}
-</style>
-<!-- Pure JS QR decoder (works on mobile) -->
-<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
-</head><body>
-<header><div class="header-inner">
-  <div class="logo"><div class="logo-pill"></div><span>Class Manager</span></div>
-  <nav>
-    <button class="nav-btn active" data-tab="students"><span class="icon"></span>Students</button>
-    <button class="nav-btn" data-tab="scanner"><span class="icon"></span>Scanner</button>
-    <button class="nav-btn" data-tab="attendance"><span class="icon"></span>Attendance</button>
-    <button class="nav-btn" data-tab="unpaid"><span class="icon"></span>Unpaid</button>
-    <button class="nav-btn" data-tab="finance"><span class="icon"></span>Finance</button>
-    <button class="nav-btn" data-tab="settings"><span class="icon"></span>Settings</button>
-  </nav>
-</div></header>
-
-<main>
-<!-- STUDENTS -->
-<section id="tab-students" class="tab-section active">
-  <div class="cards">
-    <div class="card">
-      <div class="card-header"><div><div class="card-title">Students</div><div class="card-subtitle">Add / edit.</div></div><span class="badge"><span class="badge-dot"></span>Live</span></div>
-      <form id="student-form">
-        <input type="hidden" id="student-id">
-        <div class="input-row">
-          <div class="field"><label>Name</label><input id="student-name" required></div>
-          <div class="field"><label>Phone</label><input id="student-phone" type="tel"></div>
-        </div>
-        <div class="input-row">
-          <div class="field">
-            <label>Class / Grade</label>
-            <select id="student-grade" required>
-              <option value="">Select class</option><option>Grade 6</option><option>Grade 7</option><option>Grade 8</option><option>O/L</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Free card</label>
-            <div class="flex-row"><input type="checkbox" id="student-free"><span class="muted">Free-card student</span></div>
-          </div>
-        </div>
-        <div class="flex-between">
-          <div class="muted" id="student-form-status"></div>
-          <div class="flex-row">
-            <button type="button" class="btn btn-outline btn-small" id="student-reset-btn">Clear</button>
-            <button class="btn btn-small" id="student-submit-btn">Add student</button>
-          </div>
-        </div>
-      </form>
-    </div>
-    <div class="card">
-      <div class="card-header"><div><div class="card-title">Quick stats</div><div class="card-subtitle">Current month.</div></div></div>
-      <div>
-        <div class="pill pill-quiet">Total students: <strong id="stat-total-students">0</strong></div>
-        <div class="pill pill-quiet" style="margin-top:.3rem;">Free-card: <strong id="stat-free-students">0</strong></div>
-        <div class="pill pill-quiet" style="margin-top:.3rem;">Revenue: <strong id="stat-month-revenue">0</strong> LKR</div>
-      </div>
-    </div>
-  </div>
-  <div class="card">
-    <div class="card-header">
-      <div>
-        <div class="card-title">All students</div>
-        <div class="card-subtitle">Scroll / filter / paginate.</div>
-      </div>
-      <div class="flex-row">
-        <select id="students-filter-grade" class="pill pill-quiet">
-          <option value="">All classes</option><option>Grade 6</option><option>Grade 7</option><option>Grade 8</option><option>O/L</option>
-        </select>
-        <input id="students-search" type="text" placeholder="Search name / phone">
-        <div class="pill pill-quiet" id="students-page-info">Page 1 / 1</div>
-        <button type="button" class="btn btn-outline btn-small" id="students-prev">Prev</button>
-        <button type="button" class="btn btn-outline btn-small" id="students-next">Next</button>
-        <a href="/students/qr/all" target="_blank" class="btn btn-small">Print all QRs</a>
-        <div class="pill pill-quiet" id="students-count-pill">0 students</div>
-      </div>
-    </div>
-    <div class="table-container"><table><thead><tr>
-      <th>Name</th><th>Phone</th><th>Class</th><th>Free</th><th>QR</th><th>Actions</th>
-    </tr></thead><tbody id="students-table-body"></tbody></table></div>
-  </div>
-</section>
-
-<!-- SCANNER -->
-<section id="tab-scanner" class="tab-section">
-  <div class="cards">
-    <div class="card">
-      <div class="card-header"><div><div class="card-title">QR scanner</div><div class="card-subtitle">Mobile camera · QR · Payments</div></div><span class="badge"><span class="badge-dot"></span>Camera</span></div>
-      <div id="scan-notice" class="notice"><div><strong>Scanner idle.</strong> Open scanner to start.</div><div class="tag">READY</div></div>
-      <div id="qr-reader"><span class="muted">When you open this tab on your phone, camera preview will appear here and QRs will be scanned automatically.</span></div>
-      <div class="muted">If camera access is blocked by the browser, use your normal camera app to scan a QR. It opens a link like <code>/scan/&lt;token&gt;</code> and attendance is recorded automatically.</div>
-
-      <form id="scanner-manual-form" style="margin-top:.75rem;">
-        <div class="card-subtitle" style="margin-bottom:.35rem;">Manual attendance (phone → today)</div>
-        <div class="input-row"><div class="field"><label>Phone</label><input id="scanner-manual-phone" type="tel" required></div></div>
-        <div class="flex-between"><div class="muted" id="scanner-manual-status"></div><button class="btn btn-outline btn-small">Mark present</button></div>
-      </form>
-
-      <button class="btn btn-outline btn-small" id="scanner-payment-btn" disabled style="margin-top:.6rem;">Record payment for last attendance</button>
-    </div>
-    <div class="card">
-      <div class="card-header"><div><div class="card-title">Last attendance</div><div class="card-subtitle">Auto-updated.</div></div></div>
-      <div id="scanner-last-details" class="muted">No attendance yet.</div>
-    </div>
-  </div>
-</section>
-
-<!-- ATTENDANCE (view-only) -->
-<section id="tab-attendance" class="tab-section">
-  <div class="card">
-    <div class="card-header"><div><div class="card-title">Attendance sheet</div><div class="card-subtitle">Class + date.</div></div></div>
-    <form id="attendance-load-form">
-      <div class="input-row">
-        <div class="field">
-          <label>Class</label>
-          <select id="attendance-class" required>
-            <option value="">Select class</option><option>Grade 6</option><option>Grade 7</option><option>Grade 8</option><option>O/L</option>
-          </select>
-        </div>
-        <div class="field"><label>Date</label><input id="attendance-date" type="date" required></div>
-        <div class="field" style="flex:0 0 auto;margin-top:1.2rem;"><button class="btn btn-small">Load sheet</button></div>
-      </div>
-    </form>
-    <div class="muted" id="attendance-sheet-info"></div>
-  </div>
-  <div class="card">
-    <div class="card-header"><div><div class="card-title">Attendance list</div><div class="card-subtitle">Updated from scans.</div></div></div>
-    <div class="table-container"><table><thead><tr><th>Name</th><th>Phone</th><th>Free</th><th>Present</th></tr></thead><tbody id="attendance-table-body"></tbody></table></div>
-  </div>
-</section>
-
-<!-- UNPAID -->
-<section id="tab-unpaid" class="tab-section">
-  <div class="card">
-    <div class="card-header"><div><div class="card-title">Unpaid students</div><div class="card-subtitle">Filter by month & class.</div></div></div>
-    <form id="unpaid-form">
-      <div class="input-row">
-        <div class="field"><label>Month</label><input id="unpaid-month" type="month" required></div>
-        <div class="field">
-          <label>Class (optional)</label>
-          <select id="unpaid-class">
-            <option value="">All classes</option><option>Grade 6</option><option>Grade 7</option><option>Grade 8</option><option>O/L</option>
-          </select>
-        </div>
-        <div class="field" style="flex:0 0 auto;margin-top:1.2rem;"><button class="btn btn-small">Load</button></div>
-      </div>
-    </form>
-    <div class="muted" id="unpaid-info"></div>
-  </div>
-  <div class="card">
-    <div class="card-header"><div><div class="card-title">Unpaid list</div><div class="card-subtitle">Record payments quickly.</div></div></div>
-    <div class="table-container"><table><thead><tr><th>Class</th><th>Name</th><th>Phone</th><th>Expected</th><th>Action</th></tr></thead><tbody id="unpaid-table-body"></tbody></table></div>
-  </div>
-</section>
-
-<!-- FINANCE -->
-<section id="tab-finance" class="tab-section">
-  <div class="card">
-    <div class="card-header"><div><div class="card-title">Finance overview</div><div class="card-subtitle">Monthly collections.</div></div></div>
-    <form id="finance-form">
-      <div class="input-row">
-        <div class="field"><label>Month</label><input id="finance-month" type="month" required></div>
-        <div class="field" style="flex:0 0 auto;margin-top:1.2rem;"><button class="btn btn-small">Run</button></div>
-      </div>
-    </form>
-    <div class="muted" id="finance-info"></div>
-  </div>
-  <div class="card">
-    <div class="card-header"><div><div class="card-title">Collections</div><div class="card-subtitle">Per class.</div></div></div>
-    <div class="table-container"><table><thead><tr><th>Class</th><th>Payments</th><th>Total (LKR)</th></tr></thead><tbody id="finance-table-body"></tbody></table></div>
-  </div>
-</section>
-
-<!-- SETTINGS -->
-<section id="tab-settings" class="tab-section">
-  <div class="cards">
-    <div class="card">
-      <div class="card-header"><div><div class="card-title">Database</div><div class="card-subtitle">Backup, upload & info.</div></div></div>
-      <p class="muted">DB path: <code>/app/data/class_manager.db</code> (persists with Railway volume).</p>
-      <div class="flex-row" style="margin-bottom:.5rem;">
-        <a href="/admin/db/download" class="btn btn-small" download>Download DB</a>
-        <button type="button" id="db-info-btn" class="btn btn-outline btn-small">Show DB info</button>
-      </div>
-      <div class="input-row">
-        <div class="field"><label>Upload .db</label><input id="db-upload-file" type="file" accept=".db,.sqlite,.sqlite3"></div>
-        <div class="field" style="flex:0 0 auto;margin-top:1.2rem;"><button type="button" id="db-upload-btn" class="btn btn-outline btn-small">Upload DB</button></div>
-      </div>
-      <div class="muted" id="db-info-text"></div>
-      <div class="muted" id="db-upload-status" style="margin-top:.35rem;"></div>
-    </div>
-    <div class="card">
-      <div class="card-header"><div><div class="card-title">Exports</div><div class="card-subtitle">CSV snapshots.</div></div></div>
-      <p class="muted">Download CSV exports for reporting or by grade.</p>
-      <div class="flex-row" style="margin-bottom:.5rem;">
-        <a href="/admin/export/students.csv" class="btn btn-small">All students CSV</a>
-        <a href="/admin/export/payments.csv" class="btn btn-small">Payments CSV</a>
-      </div>
-      <div class="flex-row">
-        <select id="export-grade" class="pill pill-quiet">
-          <option value="">All classes</option><option>Grade 6</option><option>Grade 7</option><option>Grade 8</option><option>O/L</option>
-        </select>
-        <button type="button" id="export-grade-btn" class="btn btn-outline btn-small">Download grade list</button>
-      </div>
-      <div class="muted" id="export-grade-info" style="margin-top:.35rem;"></div>
-    </div>
-  </div>
-</section>
-</main>
-
-<footer>Created by Pulindu Pansilu</footer>
-
-<!-- Payment modal -->
-<div class="modal-backdrop" id="payment-modal">
-  <div class="modal">
-    <div class="flex-between" style="margin-bottom:.15rem;"><h3>Record payment</h3><button class="btn btn-outline btn-small" id="payment-close-btn">Close</button></div>
-    <div class="muted" id="payment-student-label"></div>
-    <form id="payment-form" style="margin-top:.6rem;">
-      <input type="hidden" id="payment-student-id"><input type="hidden" id="payment-class-id">
-      <div class="input-row">
-        <div class="field"><label>Month</label><input id="payment-month" type="month" required></div>
-        <div class="field"><label>Amount</label><input id="payment-amount" required></div>
-      </div>
-      <div class="input-row">
-        <div class="field"><label>Method</label>
-          <select id="payment-method" required><option value="cash">Cash</option><option value="bank">Bank</option><option value="online">Online</option></select>
-        </div>
-      </div>
-      <div class="flex-between"><div class="muted" id="payment-status"></div><button class="btn btn-small">Save payment</button></div>
-    </form>
-  </div>
-</div>
-
-<script>
-// ---- generic helpers ----
-const jget=u=>fetch(u).then(r=>{if(!r.ok)throw new Error("Request failed");return r.json();});
-const jpost=(u,b)=>fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})}).then(async r=>{const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||"Request failed");return d;});
-const jput=(u,b)=>fetch(u,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})}).then(async r=>{const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||"Request failed");return d;});
-const jdel=u=>fetch(u,{method:"DELETE"}).then(async r=>{const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||"Request failed");return d;});
-const curMonth=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");};
-const today=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");};
-
-// ---- nav + scanner stop/start ----
-let activeTab="students";
-function stopScanner(){
-  try{
-    if(window._scanStream){window._scanStream.getTracks().forEach(t=>t.stop());}
-  }catch(e){}
-  window._scanStream=null;
-  window._scanVideo&& (window._scanVideo.srcObject=null);
-  window._scanRunning=false;
-}
-document.querySelectorAll(".nav-btn").forEach(btn=>{
-  btn.onclick=()=>{
-    const t=btn.dataset.tab;if(t===activeTab)return;
-    if(activeTab==="scanner" && t!=="scanner") stopScanner();
-    activeTab=t;
-    document.querySelectorAll(".nav-btn").forEach(b=>b.classList.toggle("active",b===btn));
-    document.querySelectorAll(".tab-section").forEach(s=>s.classList.toggle("active",s.id==="tab-"+t));
-    if(t==="scanner")initScanner();
-  };
-});
-
-// ---- students ----
-const sf=document.getElementById("student-form"),
-      sid=document.getElementById("student-id"),
-      sname=document.getElementById("student-name"),
-      sphone=document.getElementById("student-phone"),
-      sgrade=document.getElementById("student-grade"),
-      sfree=document.getElementById("student-free"),
-      sstatus=document.getElementById("student-form-status"),
-      sreset=document.getElementById("student-reset-btn"),
-      ssubmit=document.getElementById("student-submit-btn"),
-      tbodyStudents=document.getElementById("students-table-body"),
-      studCount=document.getElementById("students-count-pill"),
-      statTotal=document.getElementById("stat-total-students"),
-      statFree=document.getElementById("stat-free-students"),
-      statRev=document.getElementById("stat-month-revenue");
-const studentsFilterGrade=document.getElementById("students-filter-grade"),
-      studentsSearch=document.getElementById("students-search"),
-      studentsPrev=document.getElementById("students-prev"),
-      studentsNext=document.getElementById("students-next"),
-      studentsPageInfo=document.getElementById("students-page-info");
-let classesCache=[],lastScan=null,studentsData=[],studentsPage=1,studentsPageSize=30;
-
-function resetStudent(){sid.value="";sname.value="";sphone.value="";sgrade.value="";sfree.checked=false;sstatus.textContent="";ssubmit.textContent="Add student";}
-sreset.onclick=resetStudent;
-
-sf.onsubmit=async e=>{
-  e.preventDefault();
-  const p={name:sname.value.trim(),phone:sphone.value.trim(),grade:sgrade.value,is_free:sfree.checked?1:0};
-  if(!p.name||!p.grade){sstatus.textContent="Name and class required.";return;}
-  try{
-    if(sid.value){await jput("/api/students/"+encodeURIComponent(sid.value),p);sstatus.textContent="Student updated.";}
-    else{await jpost("/api/students",p);sstatus.textContent="Student added.";}
-    await loadStudents();await refreshStats();sid.value="";ssubmit.textContent="Add student";
-  }catch(err){sstatus.textContent=err.message||"Error.";}
-};
-
-async function loadClasses(){try{classesCache=(await jget("/api/classes")).classes||[];}catch(e){}}
-const classIdFromGrade=g=>{const c=classesCache.find(c=>c.title===g);return c?c.id:null;};
-
-function renderStudentsTable(){
-  const grade=studentsFilterGrade.value,term=studentsSearch.value.trim().toLowerCase();
-  let filtered=studentsData;
-  if(grade)filtered=filtered.filter(s=>s.grade===grade);
-  if(term)filtered=filtered.filter(s=>(s.name||"").toLowerCase().includes(term)||(s.phone||"").toLowerCase().includes(term));
-  const total=filtered.length,totalPages=Math.max(1,Math.ceil(total/studentsPageSize));
-  if(studentsPage>totalPages)studentsPage=totalPages;
-  const start=(studentsPage-1)*studentsPageSize,end=start+studentsPageSize;
-  const pageRows=filtered.slice(start,end);
-  tbodyStudents.innerHTML="";
-  pageRows.forEach(s=>{
-    const tr=document.createElement("tr");
-    const tdName=document.createElement("td");tdName.textContent=s.name;
-    const tdPhone=document.createElement("td");tdPhone.textContent=s.phone||"-";
-    const tdGrade=document.createElement("td");tdGrade.textContent=s.grade;
-    const tdFree=document.createElement("td");tdFree.innerHTML=s.is_free?'<span class="tag tag-free">FREE</span>':"";
-    const tdQR=document.createElement("td");
-    const qr=document.createElement("a");qr.href="/students/"+s.id+"/qr";qr.target="_blank";qr.className="btn btn-outline btn-small";qr.textContent="QR";tdQR.appendChild(qr);
-    const tdAct=document.createElement("td");
-    const ebtn=document.createElement("button");ebtn.type="button";ebtn.className="btn btn-outline btn-small";ebtn.textContent="Edit";
-    ebtn.onclick=()=>{sid.value=s.id;sname.value=s.name;sphone.value=s.phone||"";sgrade.value=s.grade;sfree.checked=!!s.is_free;ssubmit.textContent="Save changes";sstatus.textContent="";};
-    const dbtn=document.createElement("button");dbtn.type="button";dbtn.className="btn btn-outline btn-small";dbtn.style.marginLeft=".25rem";dbtn.textContent="Delete";
-    dbtn.onclick=async()=>{if(!confirm("Delete this student and all their records?"))return;try{await jdel("/api/students/"+s.id);await loadStudents();await refreshStats();}catch(e){alert("Delete failed: "+(e.message||""));}};
-    tdAct.append(ebtn,dbtn);
-    tr.append(tdName,tdPhone,tdGrade,tdFree,tdQR,tdAct);tbodyStudents.appendChild(tr);
-  });
-  studentsPageInfo.textContent="Page "+studentsPage+" / "+totalPages;
-  const globalFree=studentsData.filter(s=>s.is_free).length;
-  const globalTotal=studentsData.length;
-  studCount.textContent=globalTotal+" student"+(globalTotal===1?"":"s");
-  statTotal.textContent=globalTotal;statFree.textContent=globalFree;
-}
-studentsPrev.onclick=()=>{if(studentsPage>1){studentsPage--;renderStudentsTable();}};
-studentsNext.onclick=()=>{studentsPage++;renderStudentsTable();};
-studentsFilterGrade.onchange=()=>{studentsPage=1;renderStudentsTable();};
-studentsSearch.oninput=()=>{studentsPage=1;renderStudentsTable();};
-
-async function loadStudents(){
-  try{
-    studentsData=(await jget("/api/students")).students||[];
-    studentsPage=1;renderStudentsTable();
-  }catch(e){console.error(e);}
-}
-async function refreshStats(){try{const d=await jget("/api/finance?month="+encodeURIComponent(curMonth()));statRev.textContent=d.total||0;}catch(e){}}
-
-// ---- scanner using getUserMedia + jsQR (mobile-optimized) ----
-const scanNotice=document.getElementById("scan-notice"),
-      scanLast=document.getElementById("scanner-last-details"),
-      scanPayBtn=document.getElementById("scanner-payment-btn"),
-      scanManualForm=document.getElementById("scanner-manual-form"),
-      scanManualPhone=document.getElementById("scanner-manual-phone"),
-      scanManualStatus=document.getElementById("scanner-manual-status"),
-      qrReaderDiv=document.getElementById("qr-reader");
-
-function setScanNotice(type,msg,tag){
-  if(!scanNotice)return;
-  scanNotice.classList.remove("ok","err");
-  if(type==="ok")scanNotice.classList.add("ok");
-  if(type==="err")scanNotice.classList.add("err");
-  scanNotice.querySelector("div").innerHTML="<strong>"+msg+"</strong>";
-  if(tag)scanNotice.querySelector(".tag").textContent=tag.toUpperCase();
-}
-function beep(){
-  try{
-    const ctx=new (window.AudioContext||window.webkitAudioContext)(),o=ctx.createOscillator(),g=ctx.createGain();
-    o.connect(g);g.connect(ctx.destination);o.frequency.value=880;
-    g.gain.setValueAtTime(.0001,ctx.currentTime);
-    g.gain.exponentialRampToValueAtTime(.4,ctx.currentTime+.01);
-    g.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+.18);
-    o.start();o.stop(ctx.currentTime+.2);
-  }catch(e){}
-}
-function updateLastView(res){
-  const s=res.student,lab=s.is_free?"FREE CARD":(res.paid?"PAID":"UNPAID"),cls=s.is_free?"tag-free":(res.paid?"tag-paid":"tag-unpaid");
-  scanLast.innerHTML="<div class='pill pill-quiet'>Name: <strong>"+s.name+"</strong></div>"+
-    "<div class='pill pill-quiet'>Phone: "+(s.phone||"-")+"</div>"+
-    "<div class='pill pill-quiet'>Class: "+s.grade+"</div>"+
-    "<div class='pill pill-quiet'>Today: "+res.date+"</div>"+
-    "<div style='margin-top:.4rem;'><span class='tag "+cls+"'>"+lab+" · "+res.month+"</span></div>";
-}
-function maybeRefreshAttendance(grade,date){
-  const tab=document.getElementById("tab-attendance");
-  if(!tab.classList.contains("active"))return;
-  if(attClass.value===grade && attDate.value===date){attForm.dispatchEvent(new Event("submit"));}
-}
-function refreshFinanceUnpaidNow(){
-  const m=curMonth();
-  if(unpaidMonth.value===m)unpaidForm.dispatchEvent(new Event("submit"));
-  if(finMonth.value===m)financeForm.dispatchEvent(new Event("submit"));
-}
-function applyScanResult(res){
-  lastScan={student_id:res.student.id,class_id:res.class_id,name:res.student.name,grade:res.student.grade,is_free:res.student.is_free,paid:res.paid,month:res.month};
-  updateLastView(res);
-  const label=res.student.is_free?"FREE CARD":(res.paid?"PAID":"UNPAID");
-  setScanNotice("ok","Attendance recorded for "+res.student.name+".",label);
-  scanPayBtn.disabled=!!res.student.is_free;
-  maybeRefreshAttendance(res.student.grade,res.date);
-  refreshFinanceUnpaidNow();
-}
-let lastScanRaw=null;
-async function handleScannedText(text){
-  if(!text)return;
-  if(text===lastScanRaw)return;
-  lastScanRaw=text;
-  let token;
-  const idx=text.lastIndexOf("/scan/");
-  if(idx!==-1) token=text.slice(idx+6);
-  else {
-    const parts=text.split("/");
-    token=parts[parts.length-1];
-  }
-  if(!token){setScanNotice("err","Invalid QR content.","INVALID");return;}
-  try{
-    setScanNotice("ok","Processing scan…","WORKING");
-    const res=await jpost("/scan/"+encodeURIComponent(token)+"/auto",{});
-    beep();
-    applyScanResult(res);
-  }catch(err){
-    setScanNotice("err",err.message||"Scan failed.","ERROR");
-  }
-}
-
-function initScanner(){
-  if(window._scanRunning)return;
-  if(!qrReaderDiv)return;
-
-  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-    setScanNotice("err","Camera not supported in this browser.","UNSUPPORTED");
-    qrReaderDiv.innerHTML="<span class='muted'>Camera not supported. Use your phone camera app to scan the QR codes.</span>";
-    return;
-  }
-  if(typeof window.jsQR!=="function"){
-    setScanNotice("err","QR library failed to load in this page. Check internet / ad blocker.","LIB");
-    qrReaderDiv.innerHTML="<span class='muted'>QR scanner script could not load. Check internet connection or ad blocker, or use the normal camera app.</span>";
-    return;
-  }
-
-  qrReaderDiv.innerHTML="";
-  const video=document.createElement("video");
-  video.setAttribute("playsinline","true"); // important for iOS
-  qrReaderDiv.appendChild(video);
-
-  const canvas=document.createElement("canvas");
-  const ctx=canvas.getContext("2d");
-
-  window._scanVideo=video;
-  window._scanCanvas=canvas;
-  window._scanCtx=ctx;
-
-  setScanNotice("ok","Starting camera…","STARTING");
-
-  navigator.mediaDevices.getUserMedia({
-    video:{facingMode:"environment",width:{ideal:640},height:{ideal:480}},
-    audio:false
-  }).then(stream=>{
-    window._scanStream=stream;
-    video.srcObject=stream;
-    window._scanRunning=true;
-    video.play();
-
-    function tick(){
-      if(!window._scanRunning)return;
-      if(video.readyState===HTMLMediaElement.HAVE_ENOUGH_DATA){
-        const w=video.videoWidth || 320;
-        const h=video.videoHeight || 240;
-        canvas.width=w;
-        canvas.height=h;
-        ctx.drawImage(video,0,0,w,h);
-        try{
-          const imageData=ctx.getImageData(0,0,w,h);
-          const code=window.jsQR(imageData.data,w,h,{inversionAttempts:"dontInvert"});
-          if(code && code.data){
-            handleScannedText(code.data);
-          }
-        }catch(e){}
-      }
-      requestAnimationFrame(tick);
-    }
-    setScanNotice("ok","Camera active. Point at a QR.","READY");
-    requestAnimationFrame(tick);
-  }).catch(err=>{
-    console.error(err);
-    setScanNotice("err","Camera permission denied or unavailable.","ERROR");
-    qrReaderDiv.innerHTML="<span class='muted'>Unable to access camera. Check browser permission or use your phone camera app.</span>";
-  });
-}
-
-scanPayBtn.onclick=()=>{if(!lastScan||lastScan.is_free)return;openPayModal({student_id:lastScan.student_id,class_id:lastScan.class_id,name:lastScan.name,month:lastScan.month});};
-
-// manual attendance
-scanManualForm.onsubmit=async e=>{
-  e.preventDefault();
-  const phone=scanManualPhone.value.trim();if(!phone){scanManualStatus.textContent="Phone required.";return;}
-  try{
-    const res=await jpost("/api/attendance/manual-today-by-phone",{phone});
-    beep();scanManualPhone.value="";scanManualStatus.textContent="Marked for today.";
-    applyScanResult(res);
-  }catch(err){scanManualStatus.textContent=err.message||"Failed.";setScanNotice("err",err.message||"Manual mark failed.","ERROR");}
-};
-
-// ---- attendance view ----
-const attForm=document.getElementById("attendance-load-form"),
-      attClass=document.getElementById("attendance-class"),
-      attDate=document.getElementById("attendance-date"),
-      attInfo=document.getElementById("attendance-sheet-info"),
-      attBody=document.getElementById("attendance-table-body");
-attDate.value=today();
-attForm.onsubmit=async e=>{
-  e.preventDefault();
-  const g=attClass.value,d=attDate.value;if(!g||!d)return;
-  try{
-    const classId=classIdFromGrade(g);if(!classId)throw new Error("Class not found.");
-    const recs=(await jget("/api/attendance/list?class_id="+encodeURIComponent(classId)+"&date="+encodeURIComponent(d))).records||[];
-    attBody.innerHTML="";recs.forEach(r=>{
-      const tr=document.createElement("tr");
-      tr.innerHTML="<td>"+r.name+"</td><td>"+(r.phone||"-")+"</td><td>"+(r.is_free?"<span class='tag tag-free'>FREE</span>":"")+"</td><td>"+(r.present?"<span class='tag tag-paid'>PRESENT</span>":"<span class='tag tag-unpaid'>ABSENT</span>")+"</td>";
-      attBody.appendChild(tr);
-    });
-    attInfo.textContent="Loaded "+recs.length+" students for "+g+" on "+d+".";
-  }catch(err){attInfo.textContent=err.message||"Failed to load.";}
-};
-
-// ---- unpaid ----
-const unpaidForm=document.getElementById("unpaid-form"),
-      unpaidMonth=document.getElementById("unpaid-month"),
-      unpaidClass=document.getElementById("unpaid-class"),
-      unpaidInfo=document.getElementById("unpaid-info"),
-      unpaidBody=document.getElementById("unpaid-table-body");
-unpaidMonth.value=curMonth();
-unpaidForm.onsubmit=async e=>{
-  e.preventDefault();
-  const m=unpaidMonth.value,g=unpaidClass.value;if(!m)return;
-  try{
-    let url="/api/unpaid?month="+encodeURIComponent(m);if(g)url+="&grade="+encodeURIComponent(g);
-    const rows=(await jget(url)).unpaid||[];unpaidBody.innerHTML="";
-    rows.forEach(r=>{
-      const tr=document.createElement("tr");
-      const btn=document.createElement("button");btn.type="button";btn.className="btn btn-outline btn-small";btn.textContent="Record payment";btn.onclick=()=>openPayModal({student_id:r.student_id,class_id:r.class_id,name:r.name,month:m});
-      const act=document.createElement("td");act.appendChild(btn);
-      tr.innerHTML="<td>"+r.class_title+"</td><td>"+r.name+"</td><td>"+(r.phone||"-")+"</td><td>2000</td>";
-      tr.appendChild(act);unpaidBody.appendChild(tr);
-    });
-    const count=rows.length;unpaidInfo.textContent=count+" unpaid for "+m+(g?" in "+g:"")+". Expected "+(count*2000)+" LKR.";
-  }catch(err){unpaidInfo.textContent=err.message||"Failed to load unpaid.";}
-};
-
-// ---- finance ----
-const financeForm=document.getElementById("finance-form"),
-      finMonth=document.getElementById("finance-month"),
-      finInfo=document.getElementById("finance-info"),
-      finBody=document.getElementById("finance-table-body");
-finMonth.value=curMonth();
-financeForm.onsubmit=async e=>{
-  e.preventDefault();
-  const m=finMonth.value;if(!m)return;
-  try{
-    const d=await jget("/api/finance?month="+encodeURIComponent(m));finBody.innerHTML="";
-    (d.rows||[]).forEach(r=>{const tr=document.createElement("tr");tr.innerHTML="<td>"+r.class_title+"</td><td>"+r.payments+"</td><td>"+r.total+"</td>";finBody.appendChild(tr);});
-    finInfo.textContent="Total revenue for "+m+": "+(d.total||0)+" LKR.";
-  }catch(err){finInfo.textContent=err.message||"Failed to load finance.";}
-};
-
-// ---- payment modal ----
-const payModal=document.getElementById("payment-modal"),
-      payClose=document.getElementById("payment-close-btn"),
-      payLabel=document.getElementById("payment-student-label"),
-      payForm=document.getElementById("payment-form"),
-      payStudent=document.getElementById("payment-student-id"),
-      payClass=document.getElementById("payment-class-id"),
-      payMonth=document.getElementById("payment-month"),
-      payAmt=document.getElementById("payment-amount"),
-      payMethod=document.getElementById("payment-method"),
-      payStatus=document.getElementById("payment-status");
-function openPayModal(o){payStudent.value=o.student_id;payClass.value=o.class_id;payLabel.textContent="For "+(o.name||"student");payMonth.value=o.month||curMonth();payAmt.value="2000";payMethod.value="cash";payStatus.textContent="";payModal.classList.add("active");}
-function closePayModal(){payModal.classList.remove("active");}
-payClose.onclick=closePayModal;payModal.onclick=e=>{if(e.target===payModal)closePayModal();};
-payForm.onsubmit=async e=>{
-  e.preventDefault();
-  const p={student_id:Number(payStudent.value),class_id:Number(payClass.value),month:payMonth.value,amount:Number(payAmt.value.replace(/[^0-9]/g,""))||0,method:payMethod.value};
-  if(!p.student_id||!p.class_id||!p.month||!p.amount||!p.method){payStatus.textContent="All fields required.";return;}
-  try{await jpost("/api/payments/record",p);payStatus.textContent="Payment saved.";await refreshStats();refreshFinanceUnpaidNow();}catch(err){payStatus.textContent=err.message||"Failed to save.";}
-};
-
-// ---- settings DB info + upload + grade export ----
-const dbInfoBtn=document.getElementById("db-info-btn"),
-      dbInfoText=document.getElementById("db-info-text"),
-      dbUploadFile=document.getElementById("db-upload-file"),
-      dbUploadBtn=document.getElementById("db-upload-btn"),
-      dbUploadStatus=document.getElementById("db-upload-status");
-const exportGradeSelect=document.getElementById("export-grade"),
-      exportGradeBtn=document.getElementById("export-grade-btn"),
-      exportGradeInfo=document.getElementById("export-grade-info");
-dbInfoBtn.onclick=async()=>{try{const i=await jget("/admin/db/info");dbInfoText.textContent="Size: "+i.size_kb+" KB · Students: "+i.students+" · Payments: "+i.payments+" · Attendance: "+i.attendance;}catch(err){dbInfoText.textContent=err.message||"Failed to load DB info.";}};
-dbUploadBtn.onclick=async()=>{
-  const f=dbUploadFile.files[0];if(!f){dbUploadStatus.textContent="Choose a .db file first.";return;}
-  dbUploadStatus.textContent="Uploading…";
-  try{
-    const buf=new Uint8Array(await f.arrayBuffer());let bin="";for(let i=0;i<buf.length;i++)bin+=String.fromCharCode(buf[i]);const base64=btoa(bin);
-    await jpost("/admin/db/upload",{data:base64});dbUploadStatus.textContent="Database uploaded. Refresh the page.";
-  }catch(err){dbUploadStatus.textContent=err.message||"Upload failed.";}
-};
-exportGradeBtn.onclick=()=>{
-  const g=exportGradeSelect.value;
-  let url="/admin/export/students.csv";if(g)url+="?grade="+encodeURIComponent(g);
-  window.open(url,"_blank");
-  exportGradeInfo.textContent=g?("Downloading "+g+" list…"):"Downloading all students…";
-};
-
-// periodic refresh
-setInterval(()=>{if(activeTab==="students")loadStudents();if(activeTab==="unpaid")unpaidForm.dispatchEvent(new Event("submit"));if(activeTab==="finance")financeForm.dispatchEvent(new Event("submit"));},30000);
-
-// boot
-(async()=>{await loadClasses();await loadStudents();await refreshStats();unpaidForm.dispatchEvent(new Event("submit"));financeForm.dispatchEvent(new Event("submit"));})();
-</script>
-</body></html>`;
-
-// ---------- SHARED ATTENDANCE HELPER ----------
-function markAttendanceForToken(rawToken) {
-  const token = (rawToken || "").trim();
-  if (!token) {
-    const err = new Error("Invalid QR");
-    err.status = 400;
-    throw err;
-  }
-  const s = stmts.selectStudentForScan().get(token);
-  if (!s) {
-    const err = new Error("Student not found");
-    err.status = 404;
-    throw err;
-  }
-  const cls = classByGradeStmt().get(s.grade || "");
-  if (!cls) {
-    const err = new Error("Class not found");
-    err.status = 500;
-    throw err;
-  }
-  const d = todayStr();
-  const m = monthStr();
-  stmts.attendanceUpsert().run(s.id, cls.id, d);
-  const pay = stmts.paymentSelectMonth().get(s.id, cls.id, m);
-  return { status: "ok", date: d, month: m, student: s, class_id: cls.id, paid: !!pay };
-}
-
-// ---------- ROUTES ----------
-app.get("/", (req, res) => res.type("html").send(FRONTEND));
-app.get("/healthz", (req, res) => res.json({ ok: true }));
-
-// Simple GET scan endpoint so phone camera app can open link
-app.get("/scan/:token", (req, res) => {
-  try {
-    const result = markAttendanceForToken(req.params.token);
-    const s = result.student;
-    const label = s.is_free ? "FREE CARD" : result.paid ? "PAID" : "UNPAID";
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Scan success</title>
-<style>body{font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;background:#020617;color:#e5e7eb;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-.card{background:#0f172a;border-radius:1rem;padding:1.5rem 1.8rem;border:1px solid #1f2937;max-width:360px}
-h1{font-size:1.2rem;margin:0 0 .4rem}
-p{margin:.15rem 0;font-size:.85rem;color:#9ca3af}</style></head>
-<body><div class="card">
-<h1>Attendance recorded</h1>
-<p><strong>${s.name}</strong> · ${s.grade}</p>
-<p>Date: ${result.date}</p>
-<p>Status: ${label} (${result.month})</p>
-</div></body></html>`;
-    res.type("html").send(html);
-  } catch (e) {
-    res.status(e.status || 500).send(e.message || "Scan failed");
-  }
-});
-
-// DB admin + upload
-app.get("/admin/db/download", (req, res) => res.download(DB_FILE, "class_manager.db"));
-app.get("/admin/db/info", (req, res) => {
-  try {
-    const st = fs.statSync(DB_FILE);
-    const size_kb = Math.round(st.size / 1024);
-    const info = stmts.dbInfo();
-    res.json({
-      size_kb,
-      students: info.students,
-      payments: info.payments,
-      attendance: info.attendance
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to get DB info" });
-  }
-});
-app.post("/admin/db/upload", (req, res) => {
-  try {
-    const { data } = req.body || {};
-    if (!data) return res.status(400).json({ error: "No data" });
-    const buf = Buffer.from(data, "base64");
-    if (!buf.length) return res.status(400).json({ error: "Invalid file" });
-    if (db) db.close();
-    fs.writeFileSync(DB_FILE, buf);
-    openDb();
-    res.json({ success: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to upload DB" });
-  }
-});
-
-// CSV exports
-app.get("/admin/export/students.csv", (req, res) => {
-  try {
-    const grade = req.query.grade;
-    const stmt = grade ? stmts.studentsCsvByGrade() : stmts.studentsCsvAll();
-    const rows = grade ? stmt.all(grade) : stmt.all();
-    let csv = "id,name,phone,grade,is_free,qr_token\n";
-    for (const r of rows) {
-      csv += [
-        r.id,
-        JSON.stringify(r.name || ""),
-        JSON.stringify(r.phone || ""),
-        JSON.stringify(r.grade || ""),
-        r.is_free ? 1 : 0,
-        JSON.stringify(r.qr_token || "")
-      ].join(",") + "\n";
-    }
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="' +
-        (grade ? grade.replace(/\s+/g, "_").toLowerCase() + "_students.csv" : "students.csv") +
-        '"'
-    );
-    res.send(csv);
-  } catch (e) {
-    console.error(e);
-    res.status(500).send("Failed");
-  }
-});
-app.get("/admin/export/payments.csv", (req, res) => {
-  try {
-    const rows = stmts.paymentsCsv().all();
-    let csv =
-      "id,student_id,student_name,phone,grade,class_id,class_title,month,amount,method,created_at\n";
-    for (const r of rows) {
-      csv += [
-        r.id,
-        r.student_id,
-        JSON.stringify(r.student_name || ""),
-        JSON.stringify(r.phone || ""),
-        JSON.stringify(r.grade || ""),
-        r.class_id,
-        JSON.stringify(r.class_title || ""),
-        JSON.stringify(r.month || ""),
-        r.amount,
-        JSON.stringify(r.method || ""),
-        JSON.stringify(r.created_at || "")
-      ].join(",") + "\n";
-    }
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", 'attachment; filename="payments.csv"');
-    res.send(csv);
-  } catch (e) {
-    console.error(e);
-    res.status(500).send("Failed");
-  }
-});
-
-// classes
-app.get("/api/classes", (req, res) => {
-  try {
-    res.json({ classes: stmts.listClasses().all() });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed" });
-  }
-});
-
-// students CRUD
+// --- API: Students ---
 app.get("/api/students", (req, res) => {
-  try {
-    res.json({ students: stmts.listStudents().all() });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed" });
-  }
+  res.json(studentStmt.list.all());
 });
+
 app.post("/api/students", (req, res) => {
   try {
-    const { name, phone, grade, is_free } = req.body || {};
-    if (!name || !grade)
-      return res.status(400).json({ error: "Name and grade required" });
-    const token = genToken();
-    const info = stmts
-      .insertStudent()
-      .run(name.trim(), (phone || "").trim(), grade, token, is_free ? 1 : 0);
-    const s = stmts.selectStudentById().get(info.lastInsertRowid);
-    res.json({ student: s });
+    const name = (req.body.name || "").trim();
+    const phone = (req.body.phone || "").trim() || null;
+    if (!name) throw new Error("Name is required");
+    const info = studentStmt.insert.run(name, phone);
+    const student = studentStmt.find.get(info.lastInsertRowid);
+    res.status(201).json(student);
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed" });
+    sendError(res, 400, e.message);
   }
 });
-app.put("/api/students/:id", (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: "Invalid id" });
-    const ex = stmts.selectStudentById().get(id);
-    if (!ex) return res.status(404).json({ error: "Not found" });
-    const { name, phone, grade, is_free } = req.body || {};
-    if (!name || !grade)
-      return res.status(400).json({ error: "Name and grade required" });
-    stmts
-      .updateStudent()
-      .run(name.trim(), (phone || "").trim(), grade, is_free ? 1 : 0, id);
-    const s = stmts.selectStudentById().get(id);
-    res.json({ student: s });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed" });
-  }
-});
+
 app.delete("/api/students/:id", (req, res) => {
   try {
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: "Invalid id" });
-    stmts.deleteStudent().run(id);
-    res.json({ success: true });
+    const id = toId(req.params.id);
+    studentStmt.delete.run(id);
+    res.status(204).end();
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed" });
+    sendError(res, 400, e.message);
   }
 });
 
-// QR pages (modern minimal card)
-app.get("/students/:id/qr", (req, res) => {
+// --- API: Classes ---
+app.get("/api/classes", (req, res) => {
+  res.json(classStmt.list.all());
+});
+
+app.post("/api/classes", (req, res) => {
   try {
-    const id = Number(req.params.id);
-    if (!id) return res.status(400).send("Invalid");
-    let s = db
-      .prepare("SELECT id,name,grade,qr_token FROM students WHERE id=?")
-      .get(id);
-    if (!s) return res.status(404).send("Not found");
-    let token = s.qr_token || genToken();
-    if (!s.qr_token) {
-      db.prepare("UPDATE students SET qr_token=? WHERE id=?").run(token, id);
-      s.qr_token = token;
-    }
-    const qrText = `${req.protocol}://${req.get("host")}/scan/${token}`;
-    QRCode.toDataURL(qrText, { margin: 2, scale: 8 }, (err, url) => {
-      if (err) {
-        console.error(err);
-        return res.status(500).send("QR error");
-      }
-      const html = `<!doctype html><html><head><meta charset="utf-8"><title>${s.name} | QR</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{min-height:100vh;display:flex;justify-content:center;align-items:center;background:#fff;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;color:#e2e8f0}
-.wrap{padding:2px;border-radius:24px;background:linear-gradient(135deg,rgba(59,130,246,1),rgba(37,99,235,.35))}
-.card{width:320px;border-radius:22px;background:#020617;padding:22px 20px 18px;text-align:center}
-.name{font-size:1.3rem;font-weight:600;color:#f9fafb}
-.grade{margin-top:4px;margin-bottom:18px;font-size:.9rem;color:#9ca3af}
-.qr{padding:14px;border-radius:18px;border:1px solid rgba(148,163,184,.4);background:#020617;margin-bottom:18px}
-.qr img{width:230px;height:230px;background:#fff;border-radius:12px}
-.brand{font-size:.8rem;color:#38bdf8;font-weight:600;letter-spacing:.08em;text-transform:uppercase;margin-top:4px}
-@media print{body{background:#fff}.wrap{background:none;box-shadow:none}}</style></head>
-<body><div class="wrap"><div class="card">
-<div class="name">${s.name}</div><div class="grade">${s.grade}</div>
-<div class="qr"><img src="${url}" alt="QR"></div>
-<div class="brand">Science Zone by TS</div>
-</div></div></body></html>`;
-      res.type("html").send(html);
-    });
+    const name = (req.body.name || "").trim();
+    const fee = Number(req.body.monthly_fee);
+    if (!name) throw new Error("Class name required");
+    if (!Number.isFinite(fee) || fee < 0) throw new Error("Invalid fee");
+    const info = classStmt.insert.run(name, fee);
+    const c = classStmt.find.get(info.lastInsertRowid);
+    res.status(201).json(c);
   } catch (e) {
-    console.error(e);
-    res.status(500).send("Error");
+    sendError(res, 400, e.message);
   }
 });
 
-// all QR cards printable
-app.get("/students/qr/all", async (req, res) => {
+// --- API: Enrollments ---
+app.post("/api/enrollments", (req, res) => {
   try {
-    const students = stmts.allStudentsForQr().all();
-    const host = `${req.protocol}://${req.get("host")}`;
-    const cards = [];
-    for (const s of students) {
-      let token = s.qr_token || genToken();
-      if (!s.qr_token)
-        db.prepare("UPDATE students SET qr_token=? WHERE id=?").run(token, s.id);
-      const qrText = `${host}/scan/${token}`;
-      const url = await QRCode.toDataURL(qrText, { margin: 1, scale: 5 });
-      cards.push(
-        `<div class="wrap"><div class="card"><div class="name">${s.name}</div><div class="grade">${s.grade}</div><div class="qr"><img src="${url}" alt="QR"></div><div class="brand">Science Zone by TS</div></div></div>`
-      );
-    }
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>All QRs</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{margin:20px;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;background:#fff}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}
-.wrap{padding:2px;border-radius:24px;background:linear-gradient(135deg,rgba(59,130,246,1),rgba(37,99,235,.35))}
-.card{background:#020617;border-radius:22px;padding:18px 16px 14px;text-align:center;color:#e2e8f0}
-.name{font-size:1.1rem;font-weight:600;color:#f9fafb}
-.grade{font-size:.85rem;color:#9ca3af;margin-bottom:10px}
-.qr{padding:10px;border-radius:16px;border:1px solid rgba(148,163,184,.45);background:#020617;margin-bottom:8px}
-.qr img{width:190px;height:190px;background:#fff;border-radius:10px}
-.brand{margin-top:4px;font-size:.75rem;color:#38bdf8;font-weight:600;letter-spacing:.08em;text-transform:uppercase}
-@media print{body{margin:0}}</style></head>
-<body><div class="grid">${cards.join(
-      ""
-    )}</div><script>window.onload=function(){window.print();}</script></body></html>`;
-    res.type("html").send(html);
+    const student_id = toId(req.body.student_id, "student_id");
+    const class_id = toId(req.body.class_id, "class_id");
+    enrollStmt.enroll.run(student_id, class_id);
+    res.status(201).json({ ok: true });
   } catch (e) {
-    console.error(e);
-    res.status(500).send("Error");
+    sendError(res, 400, e.message);
   }
 });
 
-// scan via POST for in-app scanner
-app.post("/scan/:token/auto", (req, res) => {
+app.get("/api/classes/:id/students", (req, res) => {
   try {
-    const result = markAttendanceForToken(req.params.token);
-    res.json(result);
+    const class_id = toId(req.params.id, "class_id");
+    res.json(enrollStmt.studentsInClass.all(class_id));
   } catch (e) {
-    console.error(e);
-    res.status(e.status || 500).json({ error: e.message || "Failed" });
+    sendError(res, 400, e.message);
   }
 });
 
-// attendance list
-app.get("/api/attendance/list", (req, res) => {
+// --- API: Payments ---
+app.post("/api/payments", (req, res) => {
   try {
-    const class_id = Number(req.query.class_id),
-      date = req.query.date;
-    if (!class_id || !date)
-      return res.status(400).json({ error: "class_id and date required" });
-    const rows = stmts.attendanceList().all(date, class_id);
-    res.json({ records: rows });
+    const student_id = toId(req.body.student_id, "student_id");
+    const class_id = toId(req.body.class_id, "class_id");
+    const month = req.body.month || monthKey();
+    const amount = Number(req.body.amount);
+    const method = (req.body.method || "cash").trim() || "cash";
+
+    if (!isValidMonth(month)) throw new Error("Invalid month (YYYY-MM)");
+    if (!Number.isFinite(amount) || amount < 0)
+      throw new Error("Invalid amount");
+
+    paymentStmt.upsert.run(student_id, class_id, month, amount, method);
+    res.status(201).json({ ok: true });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed" });
+    sendError(res, 400, e.message);
   }
 });
 
-// manual attendance by phone (today)
-app.post("/api/attendance/manual-today-by-phone", (req, res) => {
-  try {
-    const { phone } = req.body || {};
-    if (!phone) return res.status(400).json({ error: "phone required" });
-    const s = stmts.selectStudentByPhone().get(String(phone).trim());
-    if (!s)
-      return res.status(404).json({ error: "Student not found for this phone" });
-    const cls = classByGradeStmt().get(s.grade || "");
-    if (!cls) return res.status(500).json({ error: "Class not found" });
-    const d = todayStr();
-    const m = monthStr();
-    stmts.attendanceUpsert().run(s.id, cls.id, d);
-    const pay = stmts.paymentSelectMonth().get(s.id, cls.id, m);
-    res.json({
-      success: true,
-      student: s,
-      class_id: cls.id,
-      date: d,
-      month: m,
-      paid: !!pay
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed" });
-  }
-});
-
-// payments
-app.post("/api/payments/record", (req, res) => {
-  try {
-    const { student_id, class_id, month, amount, method } = req.body || {};
-    if (!student_id || !class_id || !month || !amount || !method)
-      return res.status(400).json({ error: "Missing fields" });
-    stmts.paymentUpsert().run(student_id, class_id, month, amount, method);
-    res.json({ success: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed" });
-  }
-});
-
-// unpaid list
+// --- API: Unpaid & Finance ---
 app.get("/api/unpaid", (req, res) => {
   try {
-    const month = req.query.month,
-      grade = req.query.grade;
-    if (!month) return res.status(400).json({ error: "month required" });
-    if (!grade) {
-      res.json({ unpaid: stmts.unpaidBase().all(month) });
-    } else {
-      const sql =
-        "SELECT s.id student_id,s.name,s.phone,s.grade,c.id class_id,c.title class_title " +
-        "FROM students s JOIN classes c ON c.title=s.grade " +
-        "WHERE s.is_free=0 AND s.grade=? " +
-        "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.student_id=s.id AND p.class_id=c.id AND p.month=?) " +
-        "ORDER BY c.id,s.name";
-      res.json({ unpaid: db.prepare(sql).all(grade, month) });
-    }
+    const month = req.query.month || monthKey();
+    if (!isValidMonth(month)) throw new Error("Invalid month (YYYY-MM)");
+    const rows = paymentStmt.unpaid.all(month);
+    res.json({ month, rows });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed" });
+    sendError(res, 400, e.message);
   }
 });
 
-// finance
 app.get("/api/finance", (req, res) => {
   try {
-    const month = req.query.month;
-    if (!month) return res.status(400).json({ error: "month required" });
-    const rows = stmts.financeMonth().all(month);
-    const total = rows.reduce((s, r) => s + (r.total || 0), 0);
-    res.json({ rows, total });
+    const month = req.query.month || monthKey();
+    if (!isValidMonth(month)) throw new Error("Invalid month (YYYY-MM)");
+    const rows = paymentStmt.summaryByClass.all(month);
+    const total = rows.reduce(
+      function (sum, r) {
+        return sum + (r.total_amount || 0);
+      },
+      0
+    );
+    res.json({ month, rows, total });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed" });
+    sendError(res, 400, e.message);
   }
 });
 
-app.listen(PORT, () => console.log("Server listening on", PORT));
+// --- API: Exam slots & bookings ---
+app.get("/api/exam/slots", (req, res) => {
+  res.json(examStmt.listSlots.all());
+});
+
+app.get("/api/exam/slots/:id/layout", (req, res) => {
+  try {
+    const slotId = toId(req.params.id, "slot_id");
+    const slot = examStmt.findSlot.get(slotId);
+    if (!slot) return sendError(res, 404, "Slot not found");
+    const bookings = examStmt.bookingsBySlot.all(slotId);
+    res.json({
+      slot: slot,
+      seat_count: slot.max_seats,
+      max_per_seat: 4,
+      bookings: bookings,
+    });
+  } catch (e) {
+    sendError(res, 400, e.message);
+  }
+});
+
+app.post("/api/exam/book", (req, res) => {
+  try {
+    const slotId = toId(req.body.slot_id, "slot_id");
+    const name = (req.body.student_name || "").trim();
+    const sClass = (req.body.student_class || "").trim();
+    const seatIndex = Number(req.body.seat_index);
+    const seatPos = Number(req.body.seat_pos);
+
+    if (!name) throw new Error("Name is required");
+    if (sClass !== "Grade 7" && sClass !== "Grade 8") {
+      throw new Error("Class must be Grade 7 or Grade 8");
+    }
+
+    const slot = examStmt.findSlot.get(slotId);
+    if (!slot) throw new Error("Slot not found");
+
+    if (!Number.isInteger(seatIndex) || seatIndex < 1 || seatIndex > slot.max_seats) {
+      throw new Error("Invalid seat index");
+    }
+    if (!Number.isInteger(seatPos) || seatPos < 1 || seatPos > 4) {
+      throw new Error("Invalid seat position");
+    }
+
+    examStmt.insertBooking.run(slotId, seatIndex, seatPos, name, sClass);
+    res.status(201).json({ ok: true });
+  } catch (e) {
+    if (e && (e.code === "SQLITE_CONSTRAINT" || String(e.message).indexOf("UNIQUE") !== -1)) {
+      return sendError(res, 400, "This seat position is already booked");
+    }
+    sendError(res, 400, e.message);
+  }
+});
+
+// --- API: Health ---
+app.get("/api/health", (req, res) => {
+  res.json({
+    ok: true,
+    db: DB_PATH,
+    ts: new Date().toISOString(),
+  });
+});
+
+// ---------- Frontend HTML ----------
+const FRONTEND_HTML = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Class Management & Exam System</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    body{
+      font-family:system-ui, sans-serif;
+      background:#020617;
+      color:#e5e7eb;
+      margin:0;
+    }
+    .container{
+      max-width:1100px;
+      margin:0 auto;
+      padding:1rem;
+    }
+    header{
+      display:flex;
+      flex-wrap:wrap;
+      gap:.5rem;
+      margin-bottom:1rem;
+    }
+    header button{
+      border:none;
+      background:#1f2937;
+      color:#e5e7eb;
+      padding:.4rem .9rem;
+      border-radius:.6rem;
+      cursor:pointer;
+      font-size:.9rem;
+    }
+    header button.active{
+      background:#2563eb;
+    }
+    section{display:none;margin-top:.5rem;}
+    section.active{display:block;}
+    .card{
+      background:#020617;
+      border:1px solid #1f2937;
+      border-radius:.8rem;
+      padding:1rem;
+      margin-bottom:1rem;
+    }
+    input,select{
+      background:#020617;
+      border:1px solid #374151;
+      border-radius:.4rem;
+      padding:.35rem .5rem;
+      color:#e5e7eb;
+      width:100%;
+    }
+    label{font-size:.85rem;}
+    table{
+      width:100%;
+      border-collapse:collapse;
+      margin-top:.6rem;
+      font-size:.85rem;
+    }
+    th,td{
+      border-bottom:1px solid #1f2937;
+      padding:.4rem;
+    }
+    button.primary{
+      background:#2563eb;
+      color:#f9fafb;
+      border:none;
+      border-radius:.5rem;
+      padding:.4rem .9rem;
+      cursor:pointer;
+      font-size:.85rem;
+      margin-top:.4rem;
+    }
+    .row{display:flex;flex-wrap:wrap;gap:.7rem;}
+    .grow{flex:1 1 220px;}
+    #status{
+      margin-bottom:.6rem;
+      font-size:.85rem;
+      color:#93c5fd;
+    }
+    footer{
+      margin-top:1.5rem;
+      font-size:.8rem;
+      color:#64748b;
+      text-align:center;
+    }
+    @media(max-width:768px){
+      table{display:block;overflow-x:auto;white-space:nowrap;}
+      header{flex-direction:column;}
+    }
+
+    /* Exam seat layout - bench style */
+    #seat-layout{
+      margin-top:.6rem;
+      display:flex;
+      flex-direction:column;
+      gap:.5rem;
+      max-height:420px;
+      overflow:auto;
+      border:1px solid #1f2937;
+      border-radius:.6rem;
+      padding:.6rem .6rem 1rem;
+      background:#0f172a;
+    }
+    .bench-row{
+      display:flex;
+      align-items:center;
+      gap:.6rem;
+    }
+    .bench-label{
+      width:70px;
+      font-size:.8rem;
+      color:#9ca3af;
+    }
+    .bench{
+      flex:1;
+      background:#78350f;
+      border-radius:.4rem;
+      position:relative;
+      height:38px;
+      display:flex;
+      overflow:hidden;
+    }
+    .bench-segment{
+      flex:1;
+      position:relative;
+      cursor:pointer;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-size:.78rem;
+      color:#e5e7eb;
+      border-right:1px solid rgba(15,23,42,0.7);
+    }
+    .bench-segment:last-child{
+      border-right:none;
+    }
+    .bench-segment.empty{
+      color:#d1d5db80;
+    }
+    .bench-segment.booked{
+      cursor:not-allowed;
+    }
+    .bench-segment.booked.grade7{
+      background:#1d4ed8;
+    }
+    .bench-segment.booked.grade8{
+      background:#16a34a;
+    }
+    .bench-segment.selected{
+      outline:2px solid #facc15;
+      outline-offset:-2px;
+    }
+    #seat-info{
+      font-size:.8rem;
+      color:#e5e7eb;
+      margin-top:.4rem;
+    }
+    #seat-legend{
+      font-size:.8rem;
+      color:#9ca3af;
+      margin-top:.35rem;
+    }
+    #seat-legend span{
+      display:inline-flex;
+      align-items:center;
+      margin-right:.7rem;
+      gap:.25rem;
+    }
+    .legend-box{
+      width:14px;
+      height:14px;
+      border-radius:3px;
+      display:inline-block;
+    }
+    .legend-grade7{background:#1d4ed8;}
+    .legend-grade8{background:#16a34a;}
+    .legend-empty{background:#78350f;border:1px solid #111827;}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Class Management & Exam System</h1>
+    <div id="status"></div>
+
+    <header>
+      <button data-tab="students" class="active">Students</button>
+      <button data-tab="classes">Classes</button>
+      <button data-tab="enrollments">Enrollments</button>
+      <button data-tab="payments">Payments</button>
+      <button data-tab="exam">Main Exam</button>
+      <button data-tab="unpaid">Unpaid</button>
+      <button data-tab="finance">Finance</button>
+    </header>
+
+    <!-- Students -->
+    <section id="tab-students" class="active">
+      <div class="card">
+        <h2>Students</h2>
+        <div class="row">
+          <div class="grow">
+            <label>Name<br><input id="stu-name"></label>
+          </div>
+          <div class="grow">
+            <label>Phone<br><input id="stu-phone"></label>
+          </div>
+        </div>
+        <button class="primary" id="btn-add-student">Add Student</button>
+      </div>
+      <div class="card">
+        <h3>Student List</h3>
+        <table id="students-table">
+          <thead><tr><th>ID</th><th>Name</th><th>Phone</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Classes -->
+    <section id="tab-classes">
+      <div class="card">
+        <h2>Classes</h2>
+        <div class="row">
+          <div class="grow">
+            <label>Name<br><input id="class-name" placeholder="Grade 6 / Grade 7 ..."></label>
+          </div>
+          <div class="grow">
+            <label>Monthly fee<br><input id="class-fee" type="number" value="2000"></label>
+          </div>
+        </div>
+        <button class="primary" id="btn-add-class">Add Class</button>
+      </div>
+      <div class="card">
+        <h3>Class List</h3>
+        <table id="classes-table">
+          <thead><tr><th>ID</th><th>Name</th><th>Monthly Fee</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Enrollments -->
+    <section id="tab-enrollments">
+      <div class="card">
+        <h2>Enroll Student</h2>
+        <div class="row">
+          <div class="grow">
+            <label>Student<br><select id="enroll-student"></select></label>
+          </div>
+          <div class="grow">
+            <label>Class<br><select id="enroll-class"></select></label>
+          </div>
+        </div>
+        <button class="primary" id="btn-enroll">Enroll</button>
+      </div>
+      <div class="card">
+        <h3>Students in selected class</h3>
+        <div class="row">
+          <div class="grow">
+            <label>Class<br><select id="enroll-view-class"></select></label>
+          </div>
+        </div>
+        <table id="enroll-table">
+          <thead><tr><th>ID</th><th>Name</th><th>Phone</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Payments -->
+    <section id="tab-payments">
+      <div class="card">
+        <h2>Record Payment</h2>
+        <div class="row">
+          <div class="grow">
+            <label>Student<br><select id="pay-student"></select></label>
+          </div>
+          <div class="grow">
+            <label>Class<br><select id="pay-class"></select></label>
+          </div>
+        </div>
+        <div class="row">
+          <div class="grow">
+            <label>Month (YYYY-MM)<br><input id="pay-month"></label>
+          </div>
+          <div class="grow">
+            <label>Amount<br><input id="pay-amount" type="number" value="2000"></label>
+          </div>
+          <div class="grow">
+            <label>Method<br>
+              <select id="pay-method">
+                <option>cash</option>
+                <option>bank</option>
+                <option>online</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <button class="primary" id="btn-pay">Save Payment</button>
+      </div>
+    </section>
+
+    <!-- Main Exam Registration -->
+    <section id="tab-exam">
+      <div class="card">
+        <h2>Main Exam – Seat Booking (Dec 5)</h2>
+        <p style="font-size:.85rem;color:#9ca3af;">
+          Only Grade 7 and Grade 8 students can register. Each bench has 4 students.
+        </p>
+        <div class="row">
+          <div class="grow">
+            <label>Session<br>
+              <select id="exam-slot"></select>
+            </label>
+          </div>
+        </div>
+        <div class="row" style="margin-top:.6rem;">
+          <div class="grow">
+            <label>Student name<br><input id="exam-name" placeholder="Student name"></label>
+          </div>
+          <div class="grow">
+            <label>Class<br>
+              <select id="exam-class">
+                <option value="">Select class</option>
+                <option>Grade 7</option>
+                <option>Grade 8</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <button class="primary" id="btn-book-seat">Book Seat</button>
+        <div id="seat-info"></div>
+        <div id="seat-legend">
+          <span><span class="legend-box legend-empty"></span>Empty</span>
+          <span><span class="legend-box legend-grade7"></span>Grade 7</span>
+          <span><span class="legend-box legend-grade8"></span>Grade 8</span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Seat Layout (4 students per bench)</h3>
+        <div id="seat-layout"></div>
+      </div>
+    </section>
+
+    <!-- Unpaid -->
+    <section id="tab-unpaid">
+      <div class="card">
+        <h2>Unpaid Students</h2>
+        <div class="row">
+          <div class="grow">
+            <label>Month (YYYY-MM)<br><input id="unpaid-month"></label>
+          </div>
+        </div>
+        <button class="primary" id="btn-load-unpaid">Load Unpaid</button>
+      </div>
+      <div class="card">
+        <table id="unpaid-table">
+          <thead><tr><th>Class</th><th>Student</th><th>Phone</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Finance -->
+    <section id="tab-finance">
+      <div class="card">
+        <h2>Finance Summary</h2>
+        <div class="row">
+          <div class="grow">
+            <label>Month (YYYY-MM)<br><input id="fin-month"></label>
+          </div>
+        </div>
+        <button class="primary" id="btn-load-finance">Load Summary</button>
+      </div>
+      <div class="card">
+        <table id="finance-table">
+          <thead><tr><th>Class</th><th>Payments</th><th>Total (Rs.)</th></tr></thead>
+          <tbody></tbody>
+          <tfoot><tr><td colspan="2" style="text-align:right">Total</td><td id="finance-total"></td></tr></tfoot>
+        </table>
+      </div>
+    </section>
+
+    <footer>Created by Pulindu Pansilu</footer>
+  </div>
+
+<script>
+(function(){
+  function $(id){return document.getElementById(id);}
+  var statusEl = $("status");
+
+  function setStatus(msg,isError){
+    statusEl.textContent = msg || "";
+    statusEl.style.color = isError ? "#fca5a5" : "#93c5fd";
+    if(isError && msg){console.error(msg);}
+  }
+
+  function api(url, options){
+    options = options || {};
+    options.headers = options.headers || {};
+    if(options.body && typeof options.body !== "string"){
+      options.body = JSON.stringify(options.body);
+    }
+    options.headers["Content-Type"] = "application/json";
+    return fetch(url, options).then(function(res){
+      return res.json().then(function(data){
+        if(!res.ok){
+          throw new Error(data.error || ("HTTP " + res.status));
+        }
+        return data;
+      }).catch(function(){
+        if(!res.ok){throw new Error("HTTP " + res.status);}
+        return {};
+      });
+    });
+  }
+
+  function switchTab(tabId){
+    var buttons = document.querySelectorAll("header button");
+    for(var i=0;i<buttons.length;i++){
+      var b=buttons[i];
+      b.classList.toggle("active", b.getAttribute("data-tab") === tabId);
+    }
+    var sections = document.querySelectorAll("section");
+    for(var j=0;j<sections.length;j++){
+      var s=sections[j];
+      s.classList.toggle("active", s.id === "tab-" + tabId);
+    }
+  }
+
+  var navButtons = document.querySelectorAll("header button");
+  for(var i=0;i<navButtons.length;i++){
+    navButtons[i].addEventListener("click", function(){
+      switchTab(this.getAttribute("data-tab"));
+    });
+  }
+
+  // ----- Students -----
+  function loadStudents(){
+    return api("/api/students").then(function(data){
+      var tbody = $("students-table").querySelector("tbody");
+      var html = "";
+      data.forEach(function(s){
+        html += "<tr><td>"+s.id+"</td><td>"+s.name+"</td><td>"+(s.phone||"")+"</td></tr>";
+      });
+      tbody.innerHTML = html;
+
+      var opts = "";
+      data.forEach(function(s){
+        opts += "<option value='"+s.id+"'>"+s.name+"</option>";
+      });
+      $("enroll-student").innerHTML = opts;
+      $("pay-student").innerHTML = opts;
+    });
+  }
+
+  // ----- Classes -----
+  function loadClasses(){
+    return api("/api/classes").then(function(data){
+      var tbody = $("classes-table").querySelector("tbody");
+      var html = "";
+      data.forEach(function(c){
+        html += "<tr><td>"+c.id+"</td><td>"+c.name+"</td><td>"+c.monthly_fee+"</td></tr>";
+      });
+      tbody.innerHTML = html;
+
+      var opts = "";
+      data.forEach(function(c){
+        opts += "<option value='"+c.id+"'>"+c.name+"</option>";
+      });
+      $("enroll-class").innerHTML = opts;
+      $("enroll-view-class").innerHTML = opts;
+      $("pay-class").innerHTML = opts;
+    });
+  }
+
+  function loadStudentsInClass(){
+    var classId = $("enroll-view-class").value;
+    if(!classId){return;}
+    api("/api/classes/"+classId+"/students").then(function(data){
+      var tbody = $("enroll-table").querySelector("tbody");
+      var html = "";
+      data.forEach(function(s){
+        html += "<tr><td>"+s.id+"</td><td>"+s.name+"</td><td>"+(s.phone||"")+"</td></tr>";
+      });
+      tbody.innerHTML = html;
+    }).catch(function(e){setStatus(e.message,true);});
+  }
+
+  // ----- Exam slots & seat layout -----
+  var selectedSeatIndex = null;
+  var selectedSeatPos = null;
+
+  function loadExamSlots(){
+    return api("/api/exam/slots").then(function(data){
+      var sel = $("exam-slot");
+      var html = "";
+      data.forEach(function(slot){
+        html += "<option value='"+slot.id+"'>"+slot.label+"</option>";
+      });
+      sel.innerHTML = html;
+      if(data.length){
+        sel.value = data[0].id;
+        loadSeatLayout();
+      }
+    }).catch(function(e){
+      setStatus("Error loading exam slots: "+e.message,true);
+    });
+  }
+
+  function loadSeatLayout(){
+    var slotId = $("exam-slot").value;
+    if(!slotId){return;}
+    api("/api/exam/slots/"+slotId+"/layout").then(function(data){
+      selectedSeatIndex = null;
+      selectedSeatPos = null;
+      $("seat-info").textContent = "";
+      renderSeatLayout(data);
+      setStatus("Loaded seat layout for "+data.slot.label);
+    }).catch(function(e){
+      setStatus("Error loading seats: "+e.message,true);
+    });
+  }
+
+  function renderSeatLayout(data){
+    var layout = $("seat-layout");
+    var maxSeats = data.seat_count;
+    var bookings = data.bookings || [];
+
+    var map = {};
+    bookings.forEach(function(b){
+      map[b.seat_index+"-"+b.seat_pos] = b;
+    });
+
+    var html = "";
+    for(var i=1;i<=maxSeats;i++){
+      html += "<div class='bench-row'><div class='bench-label'>Seat "+i+"</div>";
+      html += "<div class='bench'>";
+      for(var p=1;p<=4;p++){
+        var key = i+"-"+p;
+        var b = map[key];
+        var cls = "bench-segment";
+        var text = "Pos "+p;
+        if(b){
+          cls += " booked";
+          if(b.student_class === "Grade 7"){ cls += " grade7"; }
+          else if(b.student_class === "Grade 8"){ cls += " grade8"; }
+          text = b.student_name;
+        } else {
+          cls += " empty";
+        }
+        html += "<div class='"+cls+"' data-seat='"+i+"' data-pos='"+p+"'>"+text+"</div>";
+      }
+      html += "</div></div>";
+    }
+    layout.innerHTML = html;
+  }
+
+  $("exam-slot").addEventListener("change", loadSeatLayout);
+
+  $("seat-layout").addEventListener("click", function(ev){
+    var t = ev.target;
+    if(!t.classList.contains("bench-segment")) return;
+    if(t.classList.contains("booked")){
+      setStatus("Seat already booked", true);
+      return;
+    }
+    var seat = Number(t.getAttribute("data-seat"));
+    var pos = Number(t.getAttribute("data-pos"));
+    selectedSeatIndex = seat;
+    selectedSeatPos = pos;
+    var cells = document.querySelectorAll(".bench-segment");
+    for(var i=0;i<cells.length;i++){
+      cells[i].classList.remove("selected");
+    }
+    t.classList.add("selected");
+    $("seat-info").textContent = "Selected Seat "+seat+" – Position "+pos;
+  });
+
+  $("btn-book-seat").addEventListener("click", function(){
+    var slotId = Number($("exam-slot").value);
+    var name = $("exam-name").value.trim();
+    var sClass = $("exam-class").value;
+    if(!slotId){setStatus("Select a session",true);return;}
+    if(!name){setStatus("Enter student name",true);return;}
+    if(!sClass){setStatus("Select class (Grade 7 or Grade 8)",true);return;}
+    if(selectedSeatIndex === null || selectedSeatPos === null){
+      setStatus("Click on a seat segment in the layout to choose it",true);
+      return;
+    }
+    api("/api/exam/book",{
+      method:"POST",
+      body:{
+        slot_id:slotId,
+        student_name:name,
+        student_class:sClass,
+        seat_index:selectedSeatIndex,
+        seat_pos:selectedSeatPos
+      }
+    }).then(function(){
+      setStatus("Seat booked successfully");
+      $("exam-name").value = "";
+      $("seat-info").textContent = "";
+      selectedSeatIndex = null;
+      selectedSeatPos = null;
+      loadSeatLayout();
+    }).catch(function(e){
+      setStatus(e.message,true);
+    });
+  });
+
+  // ----- Other flows -----
+  $("btn-add-student").addEventListener("click", function(){
+    var name = $("stu-name").value.trim();
+    var phone = $("stu-phone").value.trim();
+    if(!name){setStatus("Name is required",true);return;}
+    api("/api/students",{method:"POST",body:{name:name,phone:phone}}).then(function(){
+      $("stu-name").value = "";
+      $("stu-phone").value = "";
+      setStatus("Student added");
+      return loadStudents();
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  $("btn-add-class").addEventListener("click", function(){
+    var name = $("class-name").value.trim();
+    var fee = Number($("class-fee").value || 0);
+    if(!name){setStatus("Class name required",true);return;}
+    api("/api/classes",{method:"POST",body:{name:name,monthly_fee:fee}}).then(function(){
+      $("class-name").value = "";
+      $("class-fee").value = "2000";
+      setStatus("Class added");
+      return loadClasses();
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  $("btn-enroll").addEventListener("click", function(){
+    var student_id = Number($("enroll-student").value);
+    var class_id = Number($("enroll-class").value);
+    if(!student_id || !class_id){setStatus("Select student and class",true);return;}
+    api("/api/enrollments",{method:"POST",body:{student_id:student_id,class_id:class_id}}).then(function(){
+      setStatus("Student enrolled");
+      loadStudentsInClass();
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  $("enroll-view-class").addEventListener("change", loadStudentsInClass);
+
+  $("btn-pay").addEventListener("click", function(){
+    var student_id = Number($("pay-student").value);
+    var class_id = Number($("pay-class").value);
+    var month = $("pay-month").value || (new Date().toISOString().slice(0,7));
+    var amount = Number($("pay-amount").value || 0);
+    var method = $("pay-method").value;
+    api("/api/payments",{
+      method:"POST",
+      body:{student_id:student_id,class_id:class_id,month:month,amount:amount,method:method}
+    }).then(function(){
+      setStatus("Payment saved");
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  $("btn-load-unpaid").addEventListener("click", function(){
+    var month = $("unpaid-month").value || (new Date().toISOString().slice(0,7));
+    api("/api/unpaid?month="+encodeURIComponent(month)).then(function(data){
+      var tbody = $("unpaid-table").querySelector("tbody");
+      var html = "";
+      data.rows.forEach(function(r){
+        html += "<tr><td>"+r.class_name+"</td><td>"+r.student_name+"</td><td>"+(r.phone||"")+"</td></tr>";
+      });
+      tbody.innerHTML = html;
+      setStatus("Loaded unpaid for "+data.month);
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  $("btn-load-finance").addEventListener("click", function(){
+    var month = $("fin-month").value || (new Date().toISOString().slice(0,7));
+    api("/api/finance?month="+encodeURIComponent(month)).then(function(data){
+      var tbody = $("finance-table").querySelector("tbody");
+      var html = "";
+      data.rows.forEach(function(r){
+        html += "<tr><td>"+r.class_name+"</td><td>"+r.payments_count+"</td><td>"+r.total_amount+"</td></tr>";
+      });
+      tbody.innerHTML = html;
+      $("finance-total").textContent = data.total;
+      setStatus("Loaded finance for "+data.month);
+    }).catch(function(e){setStatus(e.message,true);});
+  });
+
+  // Defaults
+  var todayMonth = new Date().toISOString().slice(0,7);
+  ["pay-month","unpaid-month","fin-month"].forEach(function(id){
+    if($(id)) $(id).value = todayMonth;
+  });
+
+  // Initial load
+  Promise.all([loadStudents(), loadClasses(), loadExamSlots()]).then(function(){
+    if($("enroll-view-class").value){
+      loadStudentsInClass();
+    }
+    setStatus("Ready");
+  }).catch(function(e){
+    setStatus("Error loading initial data: "+e.message,true);
+  });
+})();
+</script>
+
+</body>
+</html>`;
+
+// Serve frontend
+app.get("/", (req, res) => {
+  res.type("html").send(FRONTEND_HTML);
+});
+
+// ---------- Start server ----------
+app.listen(PORT, () => {
+  console.log("✅ Class Manager & Exam System running on port " + PORT);
+  console.log("🗄  DB file:", DB_PATH);
+});
