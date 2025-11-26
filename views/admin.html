@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin • Class Management System</title>
+  <link rel="stylesheet" href="/static/css/main.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Administrator Portal</h1>
+      <p>Manage students, attendance, payments, QR scanning and exam bookings.</p>
+      <div class="status-bar" id="admin-status"></div>
+    </header>
+
+    <nav class="tabs" id="admin-tabs">
+      <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="students">Students</button>
+      <button data-tab="classes">Classes</button>
+      <button data-tab="enrollments">Enrollments</button>
+      <button data-tab="scanner">QR Scanner</button>
+      <button data-tab="attendance">Attendance</button>
+      <button data-tab="payments">Payments</button>
+      <button data-tab="unpaid">Unpaid</button>
+      <button data-tab="finance">Finance</button>
+      <button data-tab="exam-admin">Exam Admin</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+
+    <section id="tab-dashboard" class="tab-section active">
+      <div class="grid two" id="dashboard-cards"></div>
+    </section>
+
+    <section id="tab-students" class="tab-section">
+      <div class="grid two">
+        <div class="card">
+          <h2>Add Student</h2>
+          <form id="student-form" class="grid" style="gap:0.75rem;">
+            <div>
+              <label>Name</label>
+              <input name="name" placeholder="Student full name" required />
+            </div>
+            <div>
+              <label>Phone (username)</label>
+              <input name="phone" placeholder="07XXXXXXXX" required />
+            </div>
+            <div>
+              <label>Grade</label>
+              <select name="grade" required></select>
+            </div>
+            <div class="flex" style="gap:0.5rem;">
+              <button type="submit">Create Student Account</button>
+              <button type="button" id="student-cancel-edit" class="secondary" style="display:none;">Cancel</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
+          <h2>Student QR Preview</h2>
+          <div id="qr-preview" class="notice">Select a student to preview their QR token.</div>
+        </div>
+      </div>
+      <div class="card table-scroll">
+        <table id="students-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>Phone</th>
+              <th>Grade</th>
+              <th>QR Token</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-classes" class="tab-section">
+      <div class="grid two">
+        <div class="card">
+          <h2>Create Class</h2>
+          <form id="class-form" class="grid" style="gap:0.75rem;">
+            <div>
+              <label>Class name</label>
+              <input name="name" placeholder="Grade 9" required />
+            </div>
+            <div>
+              <label>Monthly fee (LKR)</label>
+              <input name="monthly_fee" type="number" value="2000" required />
+            </div>
+            <button type="submit">Add class</button>
+          </form>
+        </div>
+        <div class="card">
+          <h2>Update Fee</h2>
+          <form id="class-fee-form" class="grid" style="gap:0.75rem;">
+            <div>
+              <label>Select class</label>
+              <select name="class_id" required></select>
+            </div>
+            <div>
+              <label>Monthly fee (LKR)</label>
+              <input name="monthly_fee" type="number" required />
+            </div>
+            <button type="submit">Update Fee</button>
+          </form>
+        </div>
+      </div>
+      <div class="card table-scroll">
+        <table id="classes-table">
+          <thead><tr><th>ID</th><th>Name</th><th>Monthly Fee</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-enrollments" class="tab-section">
+      <div class="card">
+        <h2>Enroll Student into Class</h2>
+        <form id="enrollment-form" class="grid" style="gap:0.75rem;">
+          <div>
+            <label>Student</label>
+            <select name="student_id" required></select>
+          </div>
+          <div>
+            <label>Class</label>
+            <select name="class_id" required></select>
+          </div>
+          <button type="submit">Enroll</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Students by Class</h2>
+        <div class="flex" style="margin-bottom:0.8rem;">
+          <div class="grow">
+            <label>Class</label>
+            <select id="class-view-select"></select>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table id="enrollment-table">
+            <thead><tr><th>Name</th><th>Phone</th><th>Grade</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-scanner" class="tab-section">
+      <div class="grid two">
+        <div class="card">
+          <h2>QR Attendance Scanner</h2>
+          <div id="qr-reader" style="width:100%;min-height:320px;background:#000;border-radius:0.8rem;"></div>
+        </div>
+        <div class="card">
+          <h2>Scan Result</h2>
+          <div id="scan-result" class="notice">No scans yet.</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-attendance" class="tab-section">
+      <div class="card">
+        <h2>Attendance</h2>
+        <div class="flex">
+          <div class="grow">
+            <label>Class</label>
+            <select id="attendance-class"></select>
+          </div>
+          <div class="grow">
+            <label>Date</label>
+            <input type="date" id="attendance-date" />
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <button id="attendance-refresh">Load</button>
+          </div>
+        </div>
+      </div>
+      <div class="card table-scroll">
+        <table id="attendance-table">
+          <thead><tr><th>Name</th><th>Grade</th><th>Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-payments" class="tab-section">
+      <div class="card">
+        <h2>Record Payment</h2>
+        <form id="payment-form" class="grid" style="gap:0.75rem;">
+          <div>
+            <label>Student</label>
+            <select name="student_id" required></select>
+          </div>
+          <div>
+            <label>Class</label>
+            <select name="class_id" required></select>
+          </div>
+          <div>
+            <label>Month</label>
+            <input type="month" name="month" />
+          </div>
+          <div>
+            <label>Amount (LKR)</label>
+            <input type="number" name="amount" min="0" />
+          </div>
+          <div>
+            <label>Method</label>
+            <select name="method">
+              <option value="cash">Cash</option>
+              <option value="bank">Bank</option>
+              <option value="online">Online</option>
+            </select>
+          </div>
+          <button type="submit">Save Payment</button>
+        </form>
+      </div>
+    </section>
+
+    <section id="tab-unpaid" class="tab-section">
+      <div class="card">
+        <h2>Unpaid Students</h2>
+        <div class="flex">
+          <div class="grow">
+            <label>Month</label>
+            <input type="month" id="unpaid-month" />
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <button id="unpaid-load">Load</button>
+          </div>
+        </div>
+      </div>
+      <div class="card table-scroll">
+        <table id="unpaid-table">
+          <thead><tr><th>Class</th><th>Student</th><th>Phone</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-finance" class="tab-section">
+      <div class="card">
+        <h2>Finance Report</h2>
+        <div class="flex">
+          <div class="grow">
+            <label>Month</label>
+            <input type="month" id="finance-month" />
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <button id="finance-load">Load</button>
+          </div>
+        </div>
+      </div>
+      <div class="card table-scroll">
+        <table id="finance-table">
+          <thead><tr><th>Class</th><th>Payments</th><th>Total</th></tr></thead>
+          <tbody></tbody>
+          <tfoot><tr><td colspan="2">Grand Total</td><td id="finance-total"></td></tr></tfoot>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-exam-admin" class="tab-section">
+      <div class="card">
+        <h2>Exam Sessions</h2>
+        <div class="flex">
+          <div class="grow">
+            <label>Session</label>
+            <select id="exam-admin-slot"></select>
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <button id="exam-admin-refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="notice" id="exam-admin-info">Select a session to inspect bookings.</div>
+      </div>
+      <div class="card">
+        <div class="seat-layout" id="exam-admin-layout"></div>
+      </div>
+    </section>
+
+    <section id="tab-settings" class="tab-section">
+      <div class="card">
+        <h2>Settings</h2>
+        <div class="flex">
+          <a class="btn" href="/api/admin/db/download">Download SQLite Backup</a>
+          <button id="logout-btn" class="secondary">Logout</button>
+        </div>
+      </div>
+    </section>
+
+    <footer>Created by Pulindu Pansilu</footer>
+  </main>
+
+  <script src="https://unpkg.com/html5-qrcode@2.3.12/html5-qrcode.min.js"></script>
+  <script src="/static/js/common.js"></script>
+  <script src="/static/js/admin.js"></script>
+</body>
+</html>
