@@ -1,9 +1,9 @@
-const path = require("path");
 const Database = require("better-sqlite3");
 const bcrypt = require("bcrypt");
 const { customAlphabet } = require("nanoid");
+const { resolveDataPath } = require("./storage");
 
-const DB_FILE = process.env.DB_PATH || path.join(__dirname, "class_manager.db");
+const DB_FILE = process.env.DB_PATH || resolveDataPath("class_manager.db");
 const QR_TOKEN = customAlphabet("23456789ABCDEFGHJKLMNPQRSTUVWXYZ", 16);
 const generateQrToken = () => QR_TOKEN();
 const DEFAULT_STUDENT_PASSWORD = process.env.DEFAULT_STUDENT_PASSWORD || "1234";
