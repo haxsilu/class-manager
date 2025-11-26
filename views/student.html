@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Student Portal • Class Management System</title>
+  <link rel="stylesheet" href="/css/app.css" />
+  <script src="/js/student.js" defer></script>
+</head>
+<body class="bg-night text-slate">
+  <header class="top-bar">
+    <div>
+      <p class="eyebrow">Student Portal</p>
+      <h1>Main Exam Booking</h1>
+    </div>
+    <button id="student-logout" class="btn-ghost">Logout</button>
+  </header>
+
+  <main class="page-shell narrow">
+    <section class="card">
+      <header class="section-head">
+        <div>
+          <p class="eyebrow">December 5th</p>
+          <h2>Reserve Your Seat</h2>
+        </div>
+        <span id="student-meta" class="hint"></span>
+      </header>
+      <div class="form-grid compact">
+        <label>
+          <span>Exam Session</span>
+          <select id="student-slot"></select>
+        </label>
+      </div>
+      <p class="hint" id="booking-note">Only Grade 7 and Grade 8 students can book.</p>
+      <div class="current-booking" id="current-booking"></div>
+      <div id="student-seat-layout" class="seat-layout"></div>
+      <div class="legend">
+        <span><span class="legend-chip grade7"></span> Grade 7</span>
+        <span><span class="legend-chip grade8"></span> Grade 8</span>
+        <span><span class="legend-chip empty"></span> Available seat</span>
+      </div>
+      <button class="btn-primary" id="confirm-booking">Confirm Seat</button>
+      <button class="btn-ghost" id="cancel-booking">Cancel Booking</button>
+      <div id="student-status" class="status"></div>
+    </section>
+  </main>
+
+  <footer class="footer">Created by Pulindu Pansilu</footer>
+</body>
+</html>
