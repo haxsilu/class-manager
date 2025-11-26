@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Class Manager – Login</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body class="bg-base">
+  <div class="login-container">
+    <div class="card">
+      <h1>Class Manager</h1>
+      <p class="muted">Sign in to continue</p>
+      <% if (error) { %>
+        <div class="alert"> <%= error %> </div>
+      <% } %>
+      <form method="POST" action="/login" class="form">
+        <label>Username
+          <input type="text" name="username" required autocomplete="username" />
+        </label>
+        <label>Password
+          <input type="password" name="password" required autocomplete="current-password" />
+        </label>
+        <fieldset>
+          <legend>Login as</legend>
+          <label class="radio">
+            <input type="radio" name="role" value="student" required />
+            Student
+          </label>
+          <label class="radio">
+            <input type="radio" name="role" value="admin" />
+            Administrator
+          </label>
+        </fieldset>
+        <button type="submit">Login</button>
+      </form>
+      <footer>Created by Pulindu Pansilu</footer>
+    </div>
+  </div>
+</body>
+</html>

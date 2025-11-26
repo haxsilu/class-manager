@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin – Class Manager</title>
+  <link rel="stylesheet" href="/css/styles.css" />
+  <script src="https://unpkg.com/html5-qrcode" defer></script>
+  <script defer src="/js/admin.js"></script>
+</head>
+<body class="bg-base">
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="logo">Class Manager</div>
+      <nav>
+        <a href="/admin/dashboard" class="<%= activeTab === 'dashboard' ? 'active' : '' %>">Dashboard</a>
+        <a href="/admin/students" class="<%= activeTab === 'students' ? 'active' : '' %>">Students</a>
+        <a href="/admin/classes" class="<%= activeTab === 'classes' ? 'active' : '' %>">Classes</a>
+        <a href="/admin/enrollments" class="<%= activeTab === 'enrollments' ? 'active' : '' %>">Enrollments</a>
+        <a href="/admin/scanner" class="<%= activeTab === 'scanner' ? 'active' : '' %>">Scanner</a>
+        <a href="/admin/attendance" class="<%= activeTab === 'attendance' ? 'active' : '' %>">Attendance</a>
+        <a href="/admin/payments" class="<%= activeTab === 'payments' ? 'active' : '' %>">Payments</a>
+        <a href="/admin/unpaid" class="<%= activeTab === 'unpaid' ? 'active' : '' %>">Unpaid</a>
+        <a href="/admin/finance" class="<%= activeTab === 'finance' ? 'active' : '' %>">Finance</a>
+        <a href="/admin/exam" class="<%= activeTab === 'exam' ? 'active' : '' %>">Exam Admin</a>
+        <a href="/admin/settings" class="<%= activeTab === 'settings' ? 'active' : '' %>">Settings</a>
+      </nav>
+      <form method="POST" action="/logout" style="margin-top:1rem;">
+        <button type="submit" style="width:100%">Logout</button>
+      </form>
+    </aside>
+
+    <main class="content" id="admin-root" data-tab="<%= activeTab %>">
+      <div class="topbar">
+        <div>
+          <p class="muted">Logged in as</p>
+          <strong><%= user.username %> (Admin)</strong>
+        </div>
+        <div id="admin-status" class="status-banner"></div>
+      </div>
+
+      <section class="section-card" data-section="dashboard">
+        <h2 class="tab-title">Overview</h2>
+        <div class="grid two" id="dashboard-cards"></div>
+      </section>
+
+      <section class="section-card" data-section="students">
+        <h2 class="tab-title">Students</h2>
+        <div class="flex">
+          <div class="col">
+            <label>Name<input id="student-name" type="text" /></label>
+          </div>
+          <div class="col">
+            <label>Phone<input id="student-phone" type="text" /></label>
+          </div>
+          <div class="col">
+            <label>Grade
+              <select id="student-grade">
+                <option value="Grade 6">Grade 6</option>
+                <option value="Grade 7">Grade 7</option>
+                <option value="Grade 8">Grade 8</option>
+                <option value="O/L">O/L</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <button id="btn-create-student">Add Student</button>
+        <div class="table-wrapper" style="margin-top:1rem;">
+          <table id="students-table">
+            <thead><tr><th>Name</th><th>Grade</th><th>Phone</th><th>QR</th><th>Actions</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section-card" data-section="classes">
+        <h2 class="tab-title">Classes</h2>
+        <div class="flex">
+          <div class="col">
+            <label>Name<input id="class-name" type="text" /></label>
+          </div>
+          <div class="col">
+            <label>Monthly Fee<input id="class-fee" type="number" value="2000" /></label>
+          </div>
+        </div>
+        <button id="btn-create-class">Add Class</button>
+        <div class="table-wrapper" style="margin-top:1rem;">
+          <table id="classes-table">
+            <thead><tr><th>Name</th><th>Fee</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section-card" data-section="enrollments">
+        <h2 class="tab-title">Enrollments</h2>
+        <div class="flex">
+          <div class="col">
+            <label>Student<select id="enroll-student"></select></label>
+          </div>
+          <div class="col">
+            <label>Class<select id="enroll-class"></select></label>
+          </div>
+        </div>
+        <button id="btn-enroll">Enroll Student</button>
+        <div class="flex" style="margin-top:1rem;">
+          <div class="col">
+            <label>View Class<select id="enroll-view-class"></select></label>
+          </div>
+        </div>
+        <div class="table-wrapper" style="margin-top:0.8rem;">
+          <table id="enrolled-table">
+            <thead><tr><th>Name</th><th>Phone</th><th>Grade</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section-card" data-section="scanner">
+        <h2 class="tab-title">QR Scanner</h2>
+        <div class="qr-panel">
+          <div>
+            <div id="qr-reader" style="width:100%;"></div>
+          </div>
+          <div>
+            <div class="section-card" style="background:rgba(2,6,23,0.5);">
+              <h3>Last Scan</h3>
+              <div id="scan-result" class="qr-result">Waiting for scan...</div>
+            </div>
+            <h4>Manual Attendance</h4>
+            <label>Phone<input id="manual-phone" type="text" /></label>
+            <label>Date<input id="manual-date" type="date" /></label>
+            <button id="btn-manual-attendance">Mark Present</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-card" data-section="attendance">
+        <h2 class="tab-title">Attendance</h2>
+        <div class="flex">
+          <div class="col">
+            <label>Class<select id="attendance-class"></select></label>
+          </div>
+          <div class="col">
+            <label>Date<input id="attendance-date" type="date" /></label>
+          </div>
+        </div>
+        <button id="btn-load-attendance">Load Attendance</button>
+        <div class="attendance-list" style="margin-top:1rem;">
+          <table id="attendance-table">
+            <thead><tr><th>Name</th><th>Grade</th><th>Present</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section-card" data-section="payments">
+        <h2 class="tab-title">Payments</h2>
+        <div class="flex">
+          <div class="col"><label>Student<select id="payment-student"></select></label></div>
+          <div class="col"><label>Class<select id="payment-class"></select></label></div>
+        </div>
+        <div class="flex">
+          <div class="col"><label>Month<input id="payment-month" type="month" /></label></div>
+          <div class="col"><label>Amount<input id="payment-amount" type="number" value="2000" /></label></div>
+          <div class="col"><label>Method
+            <select id="payment-method">
+              <option value="cash">Cash</option>
+              <option value="bank">Bank</option>
+              <option value="online">Online</option>
+            </select>
+          </label></div>
+        </div>
+        <button id="btn-save-payment">Save Payment</button>
+      </section>
+
+      <section class="section-card" data-section="unpaid">
+        <h2 class="tab-title">Unpaid Students</h2>
+        <label>Month<input id="unpaid-month" type="month" /></label>
+        <button id="btn-load-unpaid">Load List</button>
+        <div class="table-wrapper" style="margin-top:1rem;">
+          <table id="unpaid-table">
+            <thead><tr><th>Class</th><th>Student</th><th>Phone</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section-card" data-section="finance">
+        <h2 class="tab-title">Finance</h2>
+        <label>Month<input id="finance-month" type="month" /></label>
+        <button id="btn-load-finance">Load Summary</button>
+        <div class="table-wrapper" style="margin-top:1rem;">
+          <table id="finance-table">
+            <thead><tr><th>Class</th><th>Payments</th><th>Total</th></tr></thead>
+            <tbody></tbody>
+            <tfoot><tr><td colspan="2" style="text-align:right;">Overall</td><td id="finance-total">0</td></tr></tfoot>
+          </table>
+        </div>
+      </section>
+
+      <section class="section-card" data-section="exam">
+        <h2 class="tab-title">Exam Sessions</h2>
+        <div id="exam-slots" class="grid two"></div>
+        <div class="section-card" style="margin-top:1rem;">
+          <h3>Seat Layout</h3>
+          <label>Session<select id="exam-admin-slot"></select></label>
+          <div id="exam-admin-layout" style="margin-top:1rem;"></div>
+        </div>
+      </section>
+
+      <section class="section-card" data-section="settings">
+        <h2 class="tab-title">Settings</h2>
+        <p>Download a snapshot of the SQLite database for backups.</p>
+        <a class="badge" href="/api/settings/export-db">Download class_manager.db</a>
+      </section>
+
+      <footer class="small">Created by Pulindu Pansilu</footer>
+    </main>
+  </div>
+  <script>
+    window.__ADMIN_PAGE__ = {
+      activeTab: "<%= activeTab %>",
+      user: <%- JSON.stringify(user || {}) %>
+    };
+  </script>
+</body>
+</html>

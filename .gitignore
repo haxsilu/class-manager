@@ -1,0 +1,6 @@
+node_modules/
+class_manager.db
+sessions.db
+*.db-shm
+*.db-wal
+.env
